@@ -689,7 +689,7 @@ public actor RpcClient {
                 var updated = collector
                 updated.events.append(agentEvent)
                 collectors[id] = updated
-                if agentEvent.type == "agent_end" {
+                if agentEvent.type == "agent_settled" {
                     collectors.removeValue(forKey: id)
                     updated.continuation.resume(returning: updated.events)
                 }
@@ -709,8 +709,13 @@ public actor RpcClient {
         }
     }
 
-    private func handleProcessExit(_ process: Process) {
+    private func handleProcessExit(_ process: Process) async {
         guard self.process === process else { return }
+        // Drain the stdout reader before applying the process-exit fallback. The reader's
+        // `bytes.lines` sequence completes on the pipe's EOF once the child exits, so this
+        // deterministically processes any final buffered lines — including a terminal
+        // `agent_settled` — instead of racing a fixed sleep.
+        await stdoutTask?.value
         let error = exitError ?? makeProcessExitError(process)
         exitError = error
         rejectPendingRequests(error)
@@ -735,7 +740,7 @@ public actor RpcClient {
 
     private func timeoutCollector(_ id: UUID) {
         guard let collector = collectors.removeValue(forKey: id) else { return }
-        collector.continuation.resume(throwing: RpcClientError("Timeout waiting for agent_end. Stderr: \(stderrBuffer)"))
+        collector.continuation.resume(throwing: RpcClientError("Timeout waiting for agent_settled. Stderr: \(stderrBuffer)"))
     }
 
     private func send(_ command: [String: Any], timeout: TimeInterval = 30) async throws -> RpcResponsePayload {
@@ -880,7 +885,7 @@ private func decodeHookUIRequest(_ dict: [String: Any]) -> RpcHookUIRequest? {
 private func decodeAgentEvent(_ dict: [String: Any]) -> RpcAgentEvent? {
     guard let type = dict["type"] as? String else { return nil }
     switch type {
-    case "agent_start", "turn_start":
+    case "agent_start", "agent_settled", "turn_start", "auto_compaction_start", "auto_compaction_end", "auto_retry_start", "auto_retry_end":
         return RpcAgentEvent(type: type)
     case "agent_end":
         let messages = (dict["messages"] as? [[String: Any]] ?? []).compactMap { decodeAgentMessage($0) }

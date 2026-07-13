@@ -8,7 +8,8 @@ public func selectConfig(
     resolvedPaths: ResolvedPaths,
     settingsManager: SettingsManager,
     cwd: String,
-    agentDir: String
+    agentDir: String,
+    initialProjectMode: Bool = false
 ) async {
     await withCheckedContinuation { continuation in
         Task { @MainActor in
@@ -35,7 +36,8 @@ public func selectConfig(
                 },
                 requestRender: {
                     ui.requestRender()
-                }
+                },
+                initialProjectMode: initialProjectMode
             )
 
             ui.addChild(selector)

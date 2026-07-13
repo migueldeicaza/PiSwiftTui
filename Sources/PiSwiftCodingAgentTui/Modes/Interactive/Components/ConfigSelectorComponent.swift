@@ -265,15 +265,21 @@ private func buildGroups(_ resolved: ResolvedPaths) -> [ResourceGroup] {
 }
 
 private final class ConfigSelectorHeader: Component {
+    var projectMode: Bool
+
+    init(projectMode: Bool) {
+        self.projectMode = projectMode
+    }
+
     func invalidate() {}
 
     func render(width: Int) -> [String] {
-        let title = theme.bold("Resource Configuration")
-        let hint = theme.fg(.muted, "space toggle - esc close")
+        let title = theme.bold(projectMode ? "Project Local Resources" : "Global Resources")
+        let hint = theme.fg(.muted, "tab switch scope - space toggle - esc close")
         let spacing = max(1, width - visibleWidth(title) - visibleWidth(hint))
         return [
             truncateToWidth("\(title)\(String(repeating: " ", count: spacing))\(hint)", maxWidth: width, ellipsis: ""),
-            theme.fg(.muted, "Type to filter resources"),
+            theme.fg(.muted, projectMode ? ".pi/settings.json - type to filter" : "Global settings - type to filter"),
         ]
     }
 }
@@ -301,6 +307,7 @@ private func relativePath(from baseDir: String, to fullPath: String) -> String {
 
 private final class ResourceList: Component, SystemCursorAware {
     private var groups: [ResourceGroup]
+    private var projectMode: Bool
     private var flatItems: [FlatEntry] = []
     private var filteredItems: [FlatEntry] = []
     private var selectedIndex = 0
@@ -313,14 +320,16 @@ private final class ResourceList: Component, SystemCursorAware {
     var onCancel: (() -> Void)?
     var onExit: (() -> Void)?
     var onToggle: ((ResourceItem, Bool) -> Void)?
+    var onSwitchScope: (() -> Void)?
 
     var usesSystemCursor: Bool {
         get { searchInput.usesSystemCursor }
         set { searchInput.usesSystemCursor = newValue }
     }
 
-    init(groups: [ResourceGroup], settingsManager: SettingsManager, cwd: String, agentDir: String) {
+    init(groups: [ResourceGroup], settingsManager: SettingsManager, cwd: String, agentDir: String, projectMode: Bool) {
         self.groups = groups
+        self.projectMode = projectMode
         self.settingsManager = settingsManager
         self.cwd = cwd
         self.agentDir = agentDir
@@ -331,7 +340,7 @@ private final class ResourceList: Component, SystemCursorAware {
 
     private func buildFlatList() {
         flatItems = []
-        for group in groups {
+        for group in groups where (projectMode ? group.scope == "project" : group.scope == "user") {
             flatItems.append(.group(group))
             for subgroup in group.subgroups {
                 flatItems.append(.subgroup(subgroup))
@@ -341,6 +350,12 @@ private final class ResourceList: Component, SystemCursorAware {
             }
         }
         selectFirstItem()
+    }
+
+    func setProjectMode(_ projectMode: Bool) {
+        self.projectMode = projectMode
+        buildFlatList()
+        filterItems(searchInput.getValue())
     }
 
     private func findNextItem(fromIndex: Int, direction: Int) -> Int {
@@ -481,6 +496,10 @@ private final class ResourceList: Component, SystemCursorAware {
             onCancel?()
             return
         }
+        if data == "\t" {
+            onSwitchScope?()
+            return
+        }
         if data == " " || kb.matches(data, TUIKeybinding.selectConfirm) {
             guard selectedIndex >= 0, selectedIndex < filteredItems.count else { return }
             guard case .item(let item) = filteredItems[selectedIndex] else { return }
@@ -592,6 +611,8 @@ private final class ResourceList: Component, SystemCursorAware {
 
 public final class ConfigSelectorComponent: Container {
     private let resourceList: ResourceList
+    private let header: ConfigSelectorHeader
+    private var projectMode: Bool
 
     public init(
         resolvedPaths: ResolvedPaths,
@@ -600,21 +621,31 @@ public final class ConfigSelectorComponent: Container {
         agentDir: String,
         onClose: @escaping () -> Void,
         onExit: @escaping () -> Void,
-        requestRender: @escaping () -> Void
+        requestRender: @escaping () -> Void,
+        initialProjectMode: Bool = false
     ) {
         let groups = buildGroups(resolvedPaths)
-        self.resourceList = ResourceList(groups: groups, settingsManager: settingsManager, cwd: cwd, agentDir: agentDir)
+        self.projectMode = initialProjectMode
+        self.header = ConfigSelectorHeader(projectMode: initialProjectMode)
+        self.resourceList = ResourceList(groups: groups, settingsManager: settingsManager, cwd: cwd, agentDir: agentDir, projectMode: initialProjectMode)
         super.init()
 
         addChild(Spacer(1))
         addChild(DynamicBorder())
         addChild(Spacer(1))
-        addChild(ConfigSelectorHeader())
+        addChild(header)
         addChild(Spacer(1))
 
         resourceList.onCancel = onClose
         resourceList.onExit = onExit
         resourceList.onToggle = { _, _ in requestRender() }
+        resourceList.onSwitchScope = { [weak self] in
+            guard let self else { return }
+            self.projectMode.toggle()
+            self.header.projectMode = self.projectMode
+            self.resourceList.setProjectMode(self.projectMode)
+            requestRender()
+        }
         addChild(resourceList)
 
         addChild(Spacer(1))

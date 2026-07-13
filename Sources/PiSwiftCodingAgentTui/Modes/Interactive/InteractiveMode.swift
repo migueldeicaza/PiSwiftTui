@@ -444,7 +444,16 @@ public final class InteractiveMode {
             SlashCommand(name: "model", description: "Select model"),
             SlashCommand(name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling"),
             SlashCommand(name: "theme", description: "Select theme"),
-            SlashCommand(name: "login", description: "Login with OAuth provider"),
+            SlashCommand(
+                name: "login",
+                description: "Login with OAuth provider",
+                argumentHint: "[provider]",
+                getArgumentCompletions: { query in
+                    let options = getLoginProviderCompletionOptions()
+                    let filtered = fuzzyFilter(options, query: query) { "\($0.value) \($0.label)" }
+                    return filtered.isEmpty ? nil : filtered
+                }
+            ),
             SlashCommand(name: "logout", description: "Logout from OAuth provider"),
             SlashCommand(name: "templates", description: "List prompt templates"),
             SlashCommand(name: "reload", description: "Reload skills, prompts, themes"),
@@ -803,8 +812,19 @@ public final class InteractiveMode {
                     }
                 }
             },
-            appendEntryHandler: { [weak session] customType, data in
-                session?.sessionManager.appendCustomEntry(customType, data)
+            appendEntryHandler: { [weak session, weak self] customType, data in
+                _ = session?.sessionManager.appendCustomEntry(customType, data)
+                // A persisted display-only entry may arrive while the assistant is still
+                // streaming. Rebuild the persisted transcript and restore the live
+                // assistant last so the visual order mirrors the session file.
+                Task { @MainActor in
+                    guard let self, self.streamingComponent != nil else { return }
+                    self.renderInitialMessages()
+                    if let streamingComponent = self.streamingComponent {
+                        self.chatContainer.addChild(streamingComponent)
+                    }
+                    self.scheduleRender()
+                }
             },
             setSessionNameHandler: { [weak session, weak self] name in
                 _ = session?.sessionManager.appendSessionInfo(name)
@@ -840,7 +860,7 @@ public final class InteractiveMode {
                 !(session?.isStreaming ?? true)
             },
             waitForIdle: { [weak session] in
-                await session?.agent.waitForIdle()
+                await session?.waitForIdle()
             },
             abort: { [weak session] in
                 Task {
@@ -1447,6 +1467,9 @@ public final class InteractiveMode {
         switch event {
         case .agent(let agentEvent):
             handleAgentEvent(agentEvent)
+        case .agentSettled:
+            // Hook follow-ups and persisted display-only entries settle after agent_end.
+            renderInitialMessages()
         case .autoCompactionStart:
             showStatus("Auto-compaction started")
         case .autoCompactionEnd(let result, let aborted, _):
@@ -1638,9 +1661,13 @@ public final class InteractiveMode {
         }
         var toolCalls: [String: (name: String, args: [String: AnyCodable])] = [:]
 
-        let context = session.sessionManager.buildSessionContext()
-        for message in context.messages {
-            switch message {
+        let entries = activeSessionEntries(session.sessionManager)
+        let cacheMisses = settingsManagerCacheMisses(session, entries: entries)
+        for entry in entries {
+            switch entry {
+            case .message(let messageEntry):
+                let message = messageEntry.message
+                switch message {
             case .assistant(let assistant):
                 for block in assistant.content {
                     if case .toolCall(let call) = block {
@@ -1662,6 +1689,18 @@ public final class InteractiveMode {
                 chatContainer.addChild(component)
             default:
                 addMessageToChat(message)
+            }
+                if let miss = cacheMisses[messageEntry.id] {
+                    chatContainer.addChild(Text(theme.fg(.warning, formatCacheMissNotice(miss)), paddingX: 1, paddingY: 0))
+                }
+            case .custom(let entry):
+                if let renderer = session.hookRunner?.getEntryRenderer(entry.customType) {
+                    let component = CustomEntryComponent(entry: entry, renderer: renderer)
+                    component.setExpanded(toolOutputExpanded)
+                    chatContainer.addChild(component)
+                }
+            default:
+                break
             }
         }
 
@@ -2431,6 +2470,8 @@ public final class InteractiveMode {
                 compaction.setExpanded(toolOutputExpanded)
             } else if let hook = child as? HookMessageComponent {
                 hook.setExpanded(toolOutputExpanded)
+            } else if let customEntry = child as? CustomEntryComponent {
+                customEntry.setExpanded(toolOutputExpanded)
             }
         }
         scheduleRender()
@@ -2554,8 +2595,9 @@ public final class InteractiveMode {
             editor.setText("")
             return
         }
-        if trimmed == "/login" {
-            showOAuthSelector(.login)
+        if trimmed == "/login" || trimmed.hasPrefix("/login ") {
+            let providerRef = trimmed == "/login" ? nil : String(trimmed.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
+            await handleLoginCommand(providerRef)
             editor.setText("")
             return
         }
@@ -2893,14 +2935,9 @@ public final class InteractiveMode {
         guard let session else { return }
         let settingsManager = session.settingsManager
 
-        let availableThinking: [ThinkingLevel] = {
-            let model = session.agent.state.model
-            guard model.reasoning else { return [.off] }
-            if supportsXhigh(model: model) {
-                return [.off, .minimal, .low, .medium, .high, .xhigh]
-            }
-            return [.off, .minimal, .low, .medium, .high]
-        }()
+        let availableThinking = getSupportedThinkingLevels(session.agent.state.model).compactMap {
+            PiSwiftAgent.ThinkingLevel(rawValue: $0.rawValue)
+        }
 
         let config = SettingsConfig(
             autoCompact: settingsManager.getCompactionEnabled(),
@@ -2916,6 +2953,7 @@ public final class InteractiveMode {
             currentTheme: settingsManager.getTheme() ?? "dark",
             availableThemes: getAvailableThemes(),
             hideThinkingBlock: hideThinkingBlock,
+            showCacheMissNotices: settingsManager.getShowCacheMissNotices(),
             collapseChangelog: settingsManager.getCollapseChangelog(),
             quietStartup: settingsManager.getQuietStartup(),
             doubleEscapeAction: settingsManager.getDoubleEscapeAction(),
@@ -2974,6 +3012,10 @@ public final class InteractiveMode {
                     self?.hideThinkingBlock = hide
                     settingsManager.setHideThinkingBlock(hide)
                     self?.applyThinkingBlockVisibility()
+                },
+                onShowCacheMissNoticesChange: { [weak self] show in
+                    settingsManager.setShowCacheMissNotices(show)
+                    self?.renderInitialMessages()
                 },
                 onCollapseChangelogChange: { collapse in
                     settingsManager.setCollapseChangelog(collapse)
@@ -3285,24 +3327,25 @@ public final class InteractiveMode {
             return
         }
 
+        var isForking = false
         showSelector { done in
             let selector = UserMessageSelectorComponent(messages: messages.map { (id: $0.entryId, text: $0.text, timestamp: nil) }, onSelect: { [weak self] entryId in
+                guard !isForking else { return }
+                isForking = true
+                done()
                 Task {
                     guard let self else { return }
                     do {
                         let result = try await session.fork(entryId)
                         if result.cancelled {
-                            done()
                             self.scheduleRender()
                             return
                         }
                         self.chatContainer.clear()
                         self.renderInitialMessages()
                         self.editor?.setText(result.selectedText)
-                        done()
                         self.showStatus("Forked to new session")
                     } catch {
-                        done()
                         self.showError(error.localizedDescription)
                     }
                 }
@@ -3455,6 +3498,28 @@ public final class InteractiveMode {
             )
             return (component: selector, focus: selector)
         }
+    }
+
+    @MainActor
+    private func handleLoginCommand(_ providerRef: String?) async {
+        guard let providerRef, !providerRef.isEmpty else {
+            showOAuthSelector(.login)
+            return
+        }
+        let normalized = providerRef.lowercased()
+        let matches = getOAuthProviders().filter {
+            $0.id.rawValue.lowercased() == normalized || $0.name.lowercased() == normalized
+        }
+        guard let provider = matches.first else {
+            showError("Unknown login provider: \(providerRef)")
+            return
+        }
+        guard provider.available else {
+            showError("Login provider is unavailable: \(provider.name)")
+            return
+        }
+        guard let session else { return }
+        await handleOAuthLogin(provider.id, authStorage: session.modelRegistry.authStorage)
     }
 
     @MainActor
@@ -4093,4 +4158,34 @@ private func decodeHookMessage(_ custom: AgentCustomMessage) -> HookMessage? {
     }
 
     return HookMessage(customType: customType, content: .text(""), display: display, details: nil, timestamp: custom.timestamp)
+}
+
+/// Returns entries on the current leaf's ancestry in persisted (oldest-first) order.
+/// Unlike `buildSessionContext`, this deliberately retains `.custom` entries for UI-only
+/// rendering while leaving model context construction to the library.
+private func activeSessionEntries(_ sessionManager: SessionManager) -> [SessionEntry] {
+    let entries = sessionManager.getEntries()
+    let byId = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
+    var ids: [String] = []
+    var current = sessionManager.getLeafId()
+    while let id = current, let entry = byId[id] {
+        ids.append(id)
+        current = entry.parentId
+    }
+    let active = Set(ids)
+    return entries.filter { active.contains($0.id) }
+}
+
+private func settingsManagerCacheMisses(_ session: AgentSession, entries: [SessionEntry]) -> [String: CacheMiss] {
+    guard session.settingsManager.getShowCacheMissNotices() else { return [:] }
+    return collectCacheMisses(entries, modelRegistry: session.modelRegistry)
+}
+
+private func formatCacheMissNotice(_ miss: CacheMiss) -> String {
+    let tokenText = NumberFormatter.localizedString(from: NSNumber(value: miss.missedTokens), number: .decimal)
+    let reason = miss.modelChanged ? " after a model change" : miss.idleMs > CACHE_TTL_MS ? " after cache expiry" : ""
+    if miss.missedCost > 0 {
+        return "[Prompt cache miss] " + tokenText + " tokens re-billed (~$" + String(format: "%.4f", miss.missedCost) + ")" + reason
+    }
+    return "[Prompt cache miss] " + tokenText + " tokens re-billed" + reason
 }

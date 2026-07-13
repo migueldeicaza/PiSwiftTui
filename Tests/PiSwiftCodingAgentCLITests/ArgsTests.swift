@@ -44,9 +44,16 @@ private func parseCLI(_ args: [String]) throws -> Args {
     #expect(try parseCLI(["--session-id", "session-123"]).sessionId == "session-123")
     #expect(try parseCLI(["--export", "session.jsonl"]).export == "session.jsonl")
     #expect(try parseCLI(["--thinking", "high"]).thinking == .high)
+    #expect(try parseCLI(["--thinking", "max"]).thinking == .max)
 
     let models = try parseCLI(["--models", "gpt-4o,claude-sonnet,gemini-pro"]).models
     #expect(models == ["gpt-4o", "claude-sonnet", "gemini-pro"])
+}
+
+@Test func parseConfigLocalFlag() throws {
+    let options = try CLIOptions.parse(["-l", "config"])
+    #expect(options.configLocal)
+    #expect(options.rawMessages == ["config"])
 }
 
 @Test func parseArgsListModels() throws {

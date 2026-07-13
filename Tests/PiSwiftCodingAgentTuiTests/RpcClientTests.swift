@@ -34,7 +34,7 @@ private func withTimeout<T: Sendable>(
     let scriptURL = tempDir.appendingPathComponent("exiting-rpc.sh")
     try """
     #!/bin/sh
-    sleep 0.2
+    sleep 1
     echo child failed >&2
     exit 7
     """.write(to: scriptURL, atomically: true, encoding: .utf8)
@@ -54,5 +54,28 @@ private func withTimeout<T: Sendable>(
         #expect(message.contains("child failed"))
     }
 
+    await client.stop()
+}
+
+@Test func rpcClientWaitsForAgentSettledEvent() async throws {
+    let tempDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("pi-rpc-settled-test-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let scriptURL = tempDir.appendingPathComponent("settled-rpc.sh")
+    try """
+    #!/bin/sh
+    sleep 0.2
+    echo '{"type":"agent_settled"}'
+    sleep 3
+    """.write(to: scriptURL, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+    let client = RpcClient(options: RpcClientOptions(cliPath: scriptURL.path, cwd: tempDir.path))
+    try await client.start()
+    try await withTimeout(seconds: 6) {
+        try await client.waitForIdle(timeout: 5)
+    }
     await client.stop()
 }

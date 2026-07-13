@@ -9,7 +9,8 @@ private let thinkingDescriptions: [ThinkingLevel: String] = [
     .low: "Light reasoning (~2k tokens)",
     .medium: "Moderate reasoning (~8k tokens)",
     .high: "Deep reasoning (~16k tokens)",
-    .xhigh: "Maximum reasoning (~32k tokens)",
+    .xhigh: "Extra-high reasoning (~32k tokens)",
+    .max: "Maximum reasoning",
 ]
 
 public final class ThinkingSelectorComponent: Container {

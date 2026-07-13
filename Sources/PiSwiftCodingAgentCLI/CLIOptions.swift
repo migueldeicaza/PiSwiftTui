@@ -29,7 +29,7 @@ struct CLIOptions: ParsableArguments {
     @Flag(name: [.customShort("r"), .customLong("resume")], help: "Select a session to resume")
     var resume: Bool = false
 
-    @Option(name: .customLong("thinking"), help: "Thinking level: off, minimal, low, medium, high, xhigh")
+    @Option(name: .customLong("thinking"), help: "Thinking level: off, minimal, low, medium, high, xhigh, max")
     var thinking: String?
 
     @Flag(name: .customLong("no-session"), help: "Don't save session (ephemeral)")
@@ -108,6 +108,9 @@ struct CLIOptions: ParsableArguments {
 
     @Flag(name: .customLong("list-models"), help: "List available models (with optional fuzzy search)")
     var listModels: Bool = false
+
+    @Flag(name: .customShort("l"), help: "Open config in project-local mode")
+    var configLocal: Bool = false
 
     @Option(name: .customLong("list-models-search"), help: ArgumentHelp("", visibility: .hidden))
     var listModelsSearch: String?
@@ -233,7 +236,7 @@ extension CLIOptions {
         return result
     }
 
-    private static let thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh"]
+    private static let thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
     private static func warn(_ message: String) {
         fputs("\(message)\n", stderr)

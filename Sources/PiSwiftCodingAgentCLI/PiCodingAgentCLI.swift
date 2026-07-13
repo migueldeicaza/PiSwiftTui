@@ -72,7 +72,8 @@ struct PiCodingAgentCLI: AsyncParsableCommand {
                 resolvedPaths: resolvedPaths,
                 settingsManager: settingsManager,
                 cwd: cwd,
-                agentDir: agentDir
+                agentDir: agentDir,
+                initialProjectMode: cli.configLocal
             )
             return
         }
@@ -510,8 +511,13 @@ struct PiCodingAgentCLI: AsyncParsableCommand {
 
         if initialThinking != .off && !createdAgent.state.model.reasoning {
             createdAgent.thinkingLevel = .off
-        } else if initialThinking == .xhigh && !supportsXhigh(model: createdAgent.state.model) {
-            createdAgent.thinkingLevel = .high
+        } else {
+            let requested = PiSwiftAI.ThinkingLevel(rawValue: initialThinking.rawValue)
+            let clamped = PiSwiftAI.clampThinkingLevel(
+                model: createdAgent.state.model,
+                requested: requested
+            )
+            createdAgent.thinkingLevel = clamped.flatMap { ThinkingLevel(rawValue: $0.rawValue) } ?? .off
         }
 
         if parsed.continue == true || parsed.resume == true {
@@ -678,6 +684,7 @@ Examples:
 
   # Configure resources (extensions, skills, prompts, themes)
   \(APP_NAME) config
+  \(APP_NAME) config -l  # start in project-local scope
 
   # Manage packages (npm/git)
   \(APP_NAME) package install <source>

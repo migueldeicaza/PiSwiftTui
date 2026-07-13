@@ -8,6 +8,14 @@ public enum OAuthSelectorMode: String, Sendable {
     case logout
 }
 
+/// Completion options for `/login <provider>`, ordered exactly as the provider selector.
+/// The id is inserted so a completed command is stable even when display names change.
+public func getLoginProviderCompletionOptions(_ providers: [OAuthProviderInfo] = getOAuthProviders()) -> [AutocompleteItem] {
+    providers.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }.map {
+        AutocompleteItem(value: $0.id.rawValue, label: $0.name, description: "subscription")
+    }
+}
+
 public final class OAuthSelectorComponent: Container {
     private let listContainer: Container
     private var allProviders: [OAuthProviderInfo] = []

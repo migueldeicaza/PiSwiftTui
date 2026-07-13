@@ -10,7 +10,8 @@ private let thinkingDescriptions: [ThinkingLevel: String] = [
     .low: "Light reasoning (~2k tokens)",
     .medium: "Moderate reasoning (~8k tokens)",
     .high: "Deep reasoning (~16k tokens)",
-    .xhigh: "Maximum reasoning (~32k tokens)",
+    .xhigh: "Extra-high reasoning (~32k tokens)",
+    .max: "Maximum reasoning",
 ]
 
 public struct SettingsConfig: Sendable {
@@ -27,6 +28,7 @@ public struct SettingsConfig: Sendable {
     public var currentTheme: String
     public var availableThemes: [String]
     public var hideThinkingBlock: Bool
+    public var showCacheMissNotices: Bool
     public var collapseChangelog: Bool
     public var quietStartup: Bool
     public var doubleEscapeAction: String
@@ -47,6 +49,7 @@ public struct SettingsConfig: Sendable {
         currentTheme: String,
         availableThemes: [String],
         hideThinkingBlock: Bool,
+        showCacheMissNotices: Bool,
         collapseChangelog: Bool,
         quietStartup: Bool,
         doubleEscapeAction: String,
@@ -66,6 +69,7 @@ public struct SettingsConfig: Sendable {
         self.currentTheme = currentTheme
         self.availableThemes = availableThemes
         self.hideThinkingBlock = hideThinkingBlock
+        self.showCacheMissNotices = showCacheMissNotices
         self.collapseChangelog = collapseChangelog
         self.quietStartup = quietStartup
         self.doubleEscapeAction = doubleEscapeAction
@@ -87,6 +91,7 @@ public struct SettingsCallbacks {
     public var onThemeChange: (String) -> Void
     public var onThemePreview: ((String) -> Void)?
     public var onHideThinkingBlockChange: (Bool) -> Void
+    public var onShowCacheMissNoticesChange: (Bool) -> Void
     public var onCollapseChangelogChange: (Bool) -> Void
     public var onQuietStartupChange: (Bool) -> Void
     public var onDoubleEscapeActionChange: (String) -> Void
@@ -107,6 +112,7 @@ public struct SettingsCallbacks {
         onThemeChange: @escaping (String) -> Void,
         onThemePreview: ((String) -> Void)? = nil,
         onHideThinkingBlockChange: @escaping (Bool) -> Void,
+        onShowCacheMissNoticesChange: @escaping (Bool) -> Void,
         onCollapseChangelogChange: @escaping (Bool) -> Void,
         onQuietStartupChange: @escaping (Bool) -> Void,
         onDoubleEscapeActionChange: @escaping (String) -> Void,
@@ -126,6 +132,7 @@ public struct SettingsCallbacks {
         self.onThemeChange = onThemeChange
         self.onThemePreview = onThemePreview
         self.onHideThinkingBlockChange = onHideThinkingBlockChange
+        self.onShowCacheMissNoticesChange = onShowCacheMissNoticesChange
         self.onCollapseChangelogChange = onCollapseChangelogChange
         self.onQuietStartupChange = onQuietStartupChange
         self.onDoubleEscapeActionChange = onDoubleEscapeActionChange
@@ -223,6 +230,13 @@ public final class SettingsSelectorComponent: Container {
                 label: "Hide thinking",
                 description: "Hide thinking blocks in assistant responses",
                 currentValue: config.hideThinkingBlock ? "true" : "false",
+                values: ["true", "false"]
+            ),
+            SettingItem(
+                id: "show-cache-miss-notices",
+                label: "Show cache miss notices",
+                description: "Show significant prompt-cache misses in the transcript",
+                currentValue: config.showCacheMissNotices ? "true" : "false",
                 values: ["true", "false"]
             ),
             SettingItem(
@@ -386,6 +400,8 @@ public final class SettingsSelectorComponent: Container {
                     }
                 case "hide-thinking":
                     callbacks.onHideThinkingBlockChange(newValue == "true")
+                case "show-cache-miss-notices":
+                    callbacks.onShowCacheMissNoticesChange(newValue == "true")
                 case "collapse-changelog":
                     callbacks.onCollapseChangelogChange(newValue == "true")
                 case "quiet-startup":

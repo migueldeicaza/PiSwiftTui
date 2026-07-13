@@ -60,7 +60,7 @@ public func runPrintMode(
                 !(session?.isStreaming ?? true)
             },
             waitForIdle: { [weak session] in
-                await session?.agent.waitForIdle()
+                await session?.waitForIdle()
             },
             abort: { [weak session] in
                 guard let session else { return }
@@ -92,6 +92,8 @@ public func runPrintMode(
         try await session.prompt(message)
     }
 
+    await session.waitForIdle()
+
     if mode == .text {
         let lastMessage = session.agent.state.messages.last
         if case .assistant(let assistant) = lastMessage {
@@ -118,6 +120,9 @@ public func runPrintMode(
                     machineOutput.writeString(combined + "\n")
                 }
             }
+            if let notice = latestCacheMissNotice(session) {
+                machineOutput.writeString(notice + "\n")
+            }
         }
     }
 
@@ -126,6 +131,21 @@ public func runPrintMode(
 
 private func flushStdout() {
     fflush(stdout)
+}
+
+private func latestCacheMissNotice(_ session: AgentSession) -> String? {
+    guard session.settingsManager.getShowCacheMissNotices() else { return nil }
+    let entries = session.sessionManager.getEntries()
+    let misses = collectCacheMisses(entries, modelRegistry: session.modelRegistry)
+    guard let entry = entries.last(where: {
+        if case .message(let message) = $0, case .assistant = message.message { return true }
+        return false
+    }), let miss = misses[entry.id] else {
+        return nil
+    }
+    let tokens = NumberFormatter.localizedString(from: NSNumber(value: miss.missedTokens), number: .decimal)
+    let reason = miss.modelChanged ? " after a model change" : miss.idleMs > CACHE_TTL_MS ? " after cache expiry" : ""
+    return "[Prompt cache miss] " + tokens + " tokens re-billed" + reason
 }
 
 private func shouldUseAnsiOutput() -> Bool {

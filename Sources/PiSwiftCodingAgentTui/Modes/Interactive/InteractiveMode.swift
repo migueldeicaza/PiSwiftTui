@@ -1406,6 +1406,9 @@ public final class InteractiveMode {
         defaultEditor.onAction(.externalEditor) { [weak self] in
             Task { await self?.openExternalEditor() }
         }
+        defaultEditor.onAction(.copyMessage) { [weak self] in
+            self?.handleCopyCommand()
+        }
         defaultEditor.onAction(.followUp) { [weak self] in
             Task { @MainActor in
                 await self?.handleAltEnter()
@@ -2543,16 +2546,23 @@ public final class InteractiveMode {
     @MainActor
     private func handleClipboardImagePaste() {
         guard let editor else { return }
-        guard clipboardHasImage(), let data = getClipboardImagePngData(), !data.isEmpty else { return }
 
-        let fileName = "pi-clipboard-\(UUID().uuidString).png"
-        let filePath = (NSTemporaryDirectory() as NSString).appendingPathComponent(fileName)
-        do {
-            try data.write(to: URL(fileURLWithPath: filePath))
-            editor.insertTextAtCursor(filePath)
+        if clipboardHasImage(), let data = getClipboardImagePngData(), !data.isEmpty {
+            let fileName = "pi-clipboard-\(UUID().uuidString).png"
+            let filePath = (NSTemporaryDirectory() as NSString).appendingPathComponent(fileName)
+            do {
+                try data.write(to: URL(fileURLWithPath: filePath))
+                editor.insertTextAtCursor(filePath)
+                scheduleRender()
+            } catch {
+                // Ignore clipboard errors.
+            }
+            return
+        }
+
+        if let text = readClipboardText() {
+            editor.insertTextAtCursor(text)
             scheduleRender()
-        } catch {
-            // Ignore clipboard errors.
         }
     }
 
@@ -3645,29 +3655,18 @@ public final class InteractiveMode {
     }
 
     @MainActor
-    private func handleCopyCommand() {
-        guard let session else { return }
-        let lastAssistant = session.agent.state.messages.reversed().compactMap { message -> AssistantMessage? in
-            if case .assistant(let assistant) = message {
-                return assistant
-            }
-            return nil
-        }.first
-
-        guard let assistant = lastAssistant else {
-            showStatus("No assistant message to copy")
+    func handleCopyCommand() {
+        guard let text = session?.getLastAssistantText()?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else {
+            showError("No agent messages to copy yet.")
             return
         }
 
-        let text = assistant.content.compactMap { block -> String? in
-            if case .text(let text) = block { return text.text }
-            return nil
-        }.joined(separator: "\n")
-
-        if copyTextToClipboard(text) {
-            showStatus("Copied last assistant message")
-        } else {
-            showWarning("Clipboard copy not available")
+        do {
+            try copyToClipboard(text)
+            showStatus("Copied last agent message to clipboard")
+        } catch {
+            showError(String(describing: error))
         }
     }
 
@@ -4066,15 +4065,6 @@ public final class InteractiveMode {
             }
         }
         scheduleRender()
-    }
-
-    private func copyTextToClipboard(_ text: String) -> Bool {
-        do {
-            try copyToClipboard(text)
-            return true
-        } catch {
-            return false
-        }
     }
 
     public func showStatus(_ message: String) {

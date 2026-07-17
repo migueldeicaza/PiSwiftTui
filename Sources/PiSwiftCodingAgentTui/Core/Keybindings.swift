@@ -19,6 +19,7 @@ public let DEFAULT_APP_KEYBINDINGS: [AppAction: [KeyId]] = [
     .followUp: [Key.alt("enter")],
     .dequeue: [Key.alt("up")],
     .pasteImage: [Key.ctrl("v")],
+    .copyMessage: [Key.ctrl("x")],
 ]
 
 public final class KeybindingsManager {

@@ -63,34 +63,51 @@ public final class AssistantMessageComponent: Container {
             contentContainer.addChild(Spacer(1))
         }
 
-        for (index, block) in message.content.enumerated() {
+        var index = 0
+        while index < message.content.count {
+            let block = message.content[index]
             switch block {
             case .text(let textContent):
                 let trimmed = textContent.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty { continue }
-                contentContainer.addChild(Markdown(trimmed, paddingX: 1, paddingY: 0, theme: getMarkdownTheme()))
-            case .thinking(let thinkingContent):
-                let trimmed = thinkingContent.thinking.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty { continue }
-                let hasTextAfter = message.content.suffix(from: index + 1).contains { block in
-                    if case let .text(text) = block {
-                        return !text.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                if !trimmed.isEmpty {
+                    contentContainer.addChild(Markdown(trimmed, paddingX: 1, paddingY: 0, theme: getMarkdownTheme()))
+                }
+                index += 1
+            case .thinking:
+                var thinkingBlocks: [String] = []
+                while index < message.content.count {
+                    guard case .thinking(let thinkingContent) = message.content[index] else { break }
+                    let trimmed = thinkingContent.thinking.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        thinkingBlocks.append(trimmed)
                     }
-                    return false
+                    index += 1
+                }
+
+                if thinkingBlocks.isEmpty { continue }
+
+                let hasVisibleContentAfter = message.content.suffix(from: index).contains { block in
+                    switch block {
+                    case .text(let text):
+                        return !text.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    case .thinking(let thinking):
+                        return !thinking.thinking.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    default:
+                        return false
+                    }
                 }
 
                 if hideThinkingBlock {
                     contentContainer.addChild(Text(theme.italic(theme.fg(.thinkingText, "Thinking...")), paddingX: 1, paddingY: 0))
-                    if hasTextAfter {
-                        contentContainer.addChild(Spacer(1))
-                    }
                 } else {
                     let style = DefaultTextStyle(color: { theme.fg(.thinkingText, $0) }, italic: true)
-                    contentContainer.addChild(Markdown(trimmed, paddingX: 1, paddingY: 0, theme: getMarkdownTheme(), defaultTextStyle: style))
+                    contentContainer.addChild(Markdown(thinkingBlocks.joined(separator: "\n\n"), paddingX: 1, paddingY: 0, theme: getMarkdownTheme(), defaultTextStyle: style))
+                }
+                if hasVisibleContentAfter {
                     contentContainer.addChild(Spacer(1))
                 }
             default:
-                continue
+                index += 1
             }
         }
 

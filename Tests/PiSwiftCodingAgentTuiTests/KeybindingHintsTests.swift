@@ -51,6 +51,11 @@ import MiniTui
     #expect(result == "ctrl+c/escape")
 }
 
+@Test func copyMessageDefaultsToCtrlX() {
+    let keybindings = KeybindingsManager.inMemory()
+    #expect(keybindings.getKeys(.copyMessage) == [MiniTui.Key.ctrl("x")])
+}
+
 // MARK: - keyHint tests
 
 @Test func keyHintFormatsWithDimKeyAndMutedDescription() {

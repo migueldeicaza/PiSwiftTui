@@ -42,6 +42,7 @@ let package = Package(
                 .product(name: "PiSwiftAI", package: "PiSwift"),
                 .product(name: "PiSwiftAgent", package: "PiSwift"),
                 .product(name: "PiSwiftCodingAgent", package: "PiSwift"),
+                .product(name: "PiReviewExtension", package: "PiSwift"),
                 "PiSwiftCodingAgentTui",
                 .product(name: "MiniTui", package: "MiniTui"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),

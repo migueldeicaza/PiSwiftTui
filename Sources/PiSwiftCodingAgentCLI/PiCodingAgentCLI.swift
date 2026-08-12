@@ -1,6 +1,7 @@
 import ArgumentParser
 import Darwin
 import Foundation
+import PiReviewExtension
 import PiSwiftAI
 import PiSwiftAgent
 import PiSwiftCodingAgent
@@ -388,7 +389,27 @@ struct PiCodingAgentCLI: AsyncParsableCommand {
             fputs("Failed to load extension: \(error.localizedDescription)\n", stderr)
         }
 
-        let allHooks = hookLoadResult.hooks + extensionResult.hooks
+        // Built-in in-process extensions (compiled into the binary, no dylib involved).
+        let loadInlineExtensions: @Sendable () -> LoadExtensionsResult = {
+            var hooks: [LoadedHook] = []
+            var errors: [ExtensionLoadError] = []
+            for inlineExtension in [PiReview.inlineExtension] {
+                let result = ExtensionLoader.load(inlineExtension, cwd: cwd, eventBus: eventBus)
+                if let hook = result.hook {
+                    hooks.append(hook)
+                }
+                if let error = result.error {
+                    errors.append(error)
+                }
+            }
+            return LoadExtensionsResult(hooks: hooks, errors: errors)
+        }
+        let inlineExtensionResult = loadInlineExtensions()
+        for error in inlineExtensionResult.errors {
+            fputs("Failed to load inline extension: \(error.localizedDescription)\n", stderr)
+        }
+
+        let allHooks = hookLoadResult.hooks + extensionResult.hooks + inlineExtensionResult.hooks
         let hookRunner: HookRunner? = allHooks.isEmpty ? nil : HookRunner(allHooks, cwd, sessionManager, modelRegistry)
 
         let agentBox = LockedState<Agent?>(nil)
@@ -537,12 +558,17 @@ struct PiCodingAgentCLI: AsyncParsableCommand {
         }
 
         let reloadExtensionsHook: @Sendable () async -> LoadExtensionsResult = {
-            await discoverAndLoadExtensions(
+            let fileExtensions = await discoverAndLoadExtensions(
                 extensionPaths,
                 cwd,
                 getAgentDir(),
                 eventBus,
                 includeProjectExtensions: trust.trusted
+            )
+            let inlineExtensions = loadInlineExtensions()
+            return LoadExtensionsResult(
+                hooks: fileExtensions.hooks + inlineExtensions.hooks,
+                errors: fileExtensions.errors + inlineExtensions.errors
             )
         }
 

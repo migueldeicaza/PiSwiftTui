@@ -949,7 +949,13 @@ public final class InteractiveMode {
     private func handleHookNavigateTree(_ targetId: String, options: HookNavigateTreeOptions?) async -> HookCommandResult {
         guard let session else { return HookCommandResult(cancelled: true) }
 
-        let result = await session.navigateTree(targetId, summarize: options?.summarize ?? false)
+        let result = await session.navigateTree(
+            targetId,
+            summarize: options?.summarize ?? false,
+            customInstructions: options?.customInstructions,
+            replaceInstructions: options?.replaceInstructions,
+            label: options?.label
+        )
         if result.cancelled {
             return HookCommandResult(cancelled: true)
         }

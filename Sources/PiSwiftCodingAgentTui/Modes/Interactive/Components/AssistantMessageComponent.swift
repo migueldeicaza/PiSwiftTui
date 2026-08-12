@@ -12,10 +12,19 @@ public final class AssistantMessageComponent: Container {
     private var hideThinkingBlock: Bool
     private var lastMessage: AssistantMessage?
     private var hasToolCalls: Bool = false
+    private var markdownConfiguration: InteractiveTuiConfiguration
+    private var isStreaming: Bool
 
-    public init(message: AssistantMessage? = nil, hideThinkingBlock: Bool = false) {
+    public init(
+        message: AssistantMessage? = nil,
+        hideThinkingBlock: Bool = false,
+        markdownConfiguration: InteractiveTuiConfiguration = InteractiveTuiConfiguration(),
+        isStreaming: Bool = false
+    ) {
         self.contentContainer = Container()
         self.hideThinkingBlock = hideThinkingBlock
+        self.markdownConfiguration = markdownConfiguration
+        self.isStreaming = isStreaming
         super.init()
         addChild(contentContainer)
         if let message {
@@ -44,6 +53,37 @@ public final class AssistantMessageComponent: Container {
         hideThinkingBlock = hide
     }
 
+    public func setStreaming(_ streaming: Bool) {
+        guard isStreaming != streaming else { return }
+        isStreaming = streaming
+        if let lastMessage {
+            updateContent(lastMessage)
+        }
+    }
+
+    public func setMarkdownConfiguration(_ configuration: InteractiveTuiConfiguration) {
+        markdownConfiguration = configuration
+        if let lastMessage {
+            updateContent(lastMessage)
+        }
+    }
+
+    private func markdownOptions(includeMermaid: Bool) -> MarkdownOptions {
+        var transforms: [MarkdownSourceTransform] = []
+        if includeMermaid && markdownConfiguration.mermaidEnabled {
+            transforms.append(createMermaidMarkdownTransform(options: MermaidMarkdownTransformOptions(
+                enabled: true,
+                renderWhileStreaming: markdownConfiguration.mermaidRenderWhileStreaming,
+                isStreaming: isStreaming,
+                theme: theme
+            )))
+        }
+        return MarkdownOptions(
+            renderLatex: markdownConfiguration.latexEnabled,
+            sourceTransforms: transforms
+        )
+    }
+
     public func updateContent(_ message: AssistantMessage) {
         lastMessage = message
         contentContainer.clear()
@@ -70,7 +110,13 @@ public final class AssistantMessageComponent: Container {
             case .text(let textContent):
                 let trimmed = textContent.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
-                    contentContainer.addChild(Markdown(trimmed, paddingX: 1, paddingY: 0, theme: getMarkdownTheme()))
+                    contentContainer.addChild(Markdown(
+                        trimmed,
+                        paddingX: markdownConfiguration.outputPad,
+                        paddingY: 0,
+                        theme: getMarkdownTheme(),
+                        options: markdownOptions(includeMermaid: true)
+                    ))
                 }
                 index += 1
             case .thinking:
@@ -98,10 +144,21 @@ public final class AssistantMessageComponent: Container {
                 }
 
                 if hideThinkingBlock {
-                    contentContainer.addChild(Text(theme.italic(theme.fg(.thinkingText, "Thinking...")), paddingX: 1, paddingY: 0))
+                    contentContainer.addChild(Text(
+                        theme.italic(theme.fg(.thinkingText, "Thinking...")),
+                        paddingX: markdownConfiguration.outputPad,
+                        paddingY: 0
+                    ))
                 } else {
                     let style = DefaultTextStyle(color: { theme.fg(.thinkingText, $0) }, italic: true)
-                    contentContainer.addChild(Markdown(thinkingBlocks.joined(separator: "\n\n"), paddingX: 1, paddingY: 0, theme: getMarkdownTheme(), defaultTextStyle: style))
+                    contentContainer.addChild(Markdown(
+                        thinkingBlocks.joined(separator: "\n\n"),
+                        paddingX: markdownConfiguration.outputPad,
+                        paddingY: 0,
+                        theme: getMarkdownTheme(),
+                        defaultTextStyle: style,
+                        options: markdownOptions(includeMermaid: false)
+                    ))
                 }
                 if hasVisibleContentAfter {
                     contentContainer.addChild(Spacer(1))
@@ -122,11 +179,19 @@ public final class AssistantMessageComponent: Container {
         if !hasToolCalls {
             switch message.stopReason {
             case .aborted:
-                contentContainer.addChild(Text(theme.fg(.error, "\nAborted"), paddingX: 1, paddingY: 0))
+                contentContainer.addChild(Text(
+                    theme.fg(.error, "\nAborted"),
+                    paddingX: markdownConfiguration.outputPad,
+                    paddingY: 0
+                ))
             case .error:
                 let errorMsg = message.errorMessage ?? "Unknown error"
                 contentContainer.addChild(Spacer(1))
-                contentContainer.addChild(Text(theme.fg(.error, "Error: \(errorMsg)"), paddingX: 1, paddingY: 0))
+                contentContainer.addChild(Text(
+                    theme.fg(.error, "Error: \(errorMsg)"),
+                    paddingX: markdownConfiguration.outputPad,
+                    paddingY: 0
+                ))
             default:
                 break
             }

@@ -36,6 +36,13 @@ public final class KeybindingsManager {
         let config = loadFromFile(configPath)
         let manager = KeybindingsManager(config: config)
 
+        var tuiBindings: [String: [KeyId]?] = [:]
+        let definitions = TUIKeybindingsManager()
+        for (action, keys) in config where definitions.getDefinition(action) != nil {
+            tuiBindings[action] = keys
+        }
+        setKeybindings(TUIKeybindingsManager(userBindings: tuiBindings))
+
         var editorBindings: [EditorAction: [KeyId]] = [:]
         for (action, keys) in config {
             if let editorAction = EditorAction(rawValue: action) {

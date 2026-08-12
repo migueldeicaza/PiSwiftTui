@@ -211,6 +211,10 @@ private struct InteractiveHookUIContext: HookUIContext {
     }
 
     func setToolsExpanded(_ expanded: Bool) {
+        // Upstream #7292: a no-op when the state already matches, so extensions calling
+        // setToolsExpanded(false) at startup do not emit a redundant collapse notice or force a
+        // full re-render of every transcript child.
+        guard expanded != getToolsExpandedHandler() else { return }
         setToolsExpandedHandler(expanded)
     }
 
@@ -239,6 +243,10 @@ public final class InteractiveMode {
 
     private var session: AgentSession?
     private var tui: TUI?
+    private var altScreenRenderer: AltScreenRenderer?
+    private var composition: InteractiveComposition?
+    private var tuiConfiguration: InteractiveTuiConfiguration
+    private var tuiModeOverride: InteractiveTuiMode?
     private var version: String = VERSION
     private var changelogMarkdown: String?
     private var scopedModels: [ScopedModel] = []
@@ -311,9 +319,14 @@ public final class InteractiveMode {
     /// receive `session_shutdown` and detached children get killed before the process exits.
     private var shutdownSignalSources: [DispatchSourceSignal] = []
 
-    public init(chatContainer: Container = Container(), ui: RenderRequesting) {
+    public init(
+        chatContainer: Container = Container(),
+        ui: RenderRequesting,
+        tuiConfiguration: InteractiveTuiConfiguration = InteractiveTuiConfiguration()
+    ) {
         self.chatContainer = chatContainer
         self.ui = ui
+        self.tuiConfiguration = tuiConfiguration
     }
 
     public convenience init(
@@ -325,9 +338,15 @@ public final class InteractiveMode {
         setToolUIContext: @escaping (HookUIContext, Bool) -> Void = { _, _ in },
         setToolSendMessageHandler: @escaping @Sendable (_ handler: @escaping HookSendMessageHandler) -> Void = { _ in },
         fdPath: String? = nil,
-        verbose: Bool = false
+        verbose: Bool = false,
+        tuiMode: InteractiveTuiMode? = nil
     ) {
-        self.init(chatContainer: Container(), ui: NullRenderRequester())
+        self.init(
+            chatContainer: Container(),
+            ui: NullRenderRequester(),
+            tuiConfiguration: InteractiveTuiConfiguration(mode: tuiMode ?? .regular)
+        )
+        self.tuiModeOverride = tuiMode
         self.session = session
         self.version = version
         self.changelogMarkdown = changelogMarkdown
@@ -397,6 +416,10 @@ public final class InteractiveMode {
         }
 
         let settingsManager = session.settingsManager
+        tuiConfiguration = InteractiveTuiConfiguration(
+            settingsManager: settingsManager,
+            modeOverride: tuiModeOverride
+        )
         hideThinkingBlock = settingsManager.getHideThinkingBlock()
 
         initTheme(settingsManager.getTheme(), enableWatcher: true)
@@ -478,44 +501,80 @@ public final class InteractiveMode {
         baseSlashCommands = slashCommands
         rebuildAutocomplete()
 
+        var transcriptChildren: [Component] = []
+        let addTranscriptChild: (Component) -> Void = { component in
+            tui.addChild(component)
+            transcriptChildren.append(component)
+        }
+
         let shouldShowHeader = verboseStartup || !settingsManager.getQuietStartup()
         if shouldShowHeader {
             let header = buildHeaderText()
-            tui.addChild(Spacer(1))
-            tui.addChild(Text(header, paddingX: 1, paddingY: 0))
-            tui.addChild(Spacer(1))
+            addTranscriptChild(Spacer(1))
+            addTranscriptChild(Text(header, paddingX: 1, paddingY: 0))
+            addTranscriptChild(Spacer(1))
 
             if let changelogMarkdown, !changelogMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                tui.addChild(DynamicBorder())
+                addTranscriptChild(DynamicBorder())
                 if settingsManager.getCollapseChangelog() {
                     let condensed = "Updated. Use /changelog to view details."
-                    tui.addChild(Text(condensed, paddingX: 1, paddingY: 0))
+                    addTranscriptChild(Text(condensed, paddingX: 1, paddingY: 0))
                 } else {
-                    tui.addChild(Text(theme.bold(theme.fg(.accent, "What's New")), paddingX: 1, paddingY: 0))
-                    tui.addChild(Spacer(1))
-                    tui.addChild(Markdown(changelogMarkdown.trimmingCharacters(in: .whitespacesAndNewlines), paddingX: 1, paddingY: 0, theme: getMarkdownTheme()))
-                    tui.addChild(Spacer(1))
+                    addTranscriptChild(Text(theme.bold(theme.fg(.accent, "What's New")), paddingX: 1, paddingY: 0))
+                    addTranscriptChild(Spacer(1))
+                    addTranscriptChild(Markdown(changelogMarkdown.trimmingCharacters(in: .whitespacesAndNewlines), paddingX: 1, paddingY: 0, theme: getMarkdownTheme()))
+                    addTranscriptChild(Spacer(1))
                 }
-                tui.addChild(DynamicBorder())
+                addTranscriptChild(DynamicBorder())
             }
         } else {
-            tui.addChild(Text("", paddingX: 0, paddingY: 0))
+            addTranscriptChild(Text("", paddingX: 0, paddingY: 0))
             if let changelogMarkdown, !changelogMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                tui.addChild(Spacer(1))
+                addTranscriptChild(Spacer(1))
                 let condensed = "Updated. Use /changelog to view details."
-                tui.addChild(Text(condensed, paddingX: 1, paddingY: 0))
+                addTranscriptChild(Text(condensed, paddingX: 1, paddingY: 0))
             }
         }
 
         tui.addChild(chatContainer)
+        transcriptChildren.append(chatContainer)
         tui.addChild(pendingMessages)
         tui.addChild(status)
         tui.addChild(widgets)
-        tui.addChild(Spacer(1))
+        let editorSpacer = Spacer(1)
+        tui.addChild(editorSpacer)
         tui.addChild(editorContainer)
         tui.addChild(footerContainer)
+
+        let composition = InteractiveComposition(
+            transcriptChildren: transcriptChildren,
+            pendingMessages: pendingMessages,
+            status: status,
+            widgets: widgets,
+            editorSpacer: editorSpacer,
+            editor: editorContainer,
+            footer: footerContainer,
+            scrollbar: tuiConfiguration.scrollbar,
+            scrollbarStyle: fullscreenScrollbarStyle
+        )
+        self.composition = composition
+        let altScreenRenderer = tui.enableAltScreen(options: AltScreenRendererOptions(
+            wheelScrollLines: tuiConfiguration.mouseWheelStep
+        ))
+        altScreenRenderer.setLayoutRoot(composition.fullscreenRoot)
+        self.altScreenRenderer = altScreenRenderer
+        if tuiConfiguration.mode == .fullscreen {
+            _ = tui.switchRenderer(to: .altScreen)
+        }
         tui.setFocus(defaultEditor)
         tui.start()
+
+        if settingsManager.getTheme() == nil {
+            let detectedTheme = await detectTerminalTheme(ui: tui, timeoutMs: 100)
+            _ = setTheme(detectedTheme.rawValue, enableWatcher: true)
+            tui.invalidate()
+            tui.requestRender()
+        }
 
         await initializeHooksAndCustomTools()
         configureKeyHandlers()
@@ -536,6 +595,53 @@ public final class InteractiveMode {
         if let tmuxWarning = await checkTmuxKeyboardSetup() {
             showWarning(tmuxWarning)
         }
+    }
+
+    @MainActor
+    @discardableResult
+    func switchTuiMode(_ mode: InteractiveTuiMode) -> Bool {
+        guard let tui else { return false }
+        if tui.hasOverlay() { return false }
+        let rendererMode: TuiMode = mode == .fullscreen ? .altScreen : .mainScreen
+        guard tui.switchRenderer(to: rendererMode) else { return false }
+        tuiConfiguration.mode = mode
+        return true
+    }
+
+    @MainActor
+    private func setFullscreenScrollbar(_ mode: FullscreenScrollbarMode) {
+        tuiConfiguration.scrollbar = mode
+        composition?.transcriptScrollView.setScrollbar(mode.miniTuiValue)
+        tui?.requestRender()
+    }
+
+    @MainActor
+    private func setMouseWheelStep(_ step: Int) {
+        guard let tui, let composition else { return }
+        let normalized = max(1, step)
+        guard normalized != tuiConfiguration.mouseWheelStep else { return }
+        let wasFullscreen = tui.mode == .altScreen
+        if wasFullscreen {
+            _ = tui.switchRenderer(to: .mainScreen)
+        }
+        let renderer = tui.enableAltScreen(options: AltScreenRendererOptions(wheelScrollLines: normalized))
+        renderer.setLayoutRoot(composition.fullscreenRoot)
+        altScreenRenderer = renderer
+        tuiConfiguration.mouseWheelStep = normalized
+        if wasFullscreen {
+            _ = tui.switchRenderer(to: .altScreen)
+        }
+    }
+
+    @MainActor
+    private func refreshMarkdownRendering() {
+        renderInitialMessages()
+        if let streamingComponent, let streamingMessage {
+            streamingComponent.setMarkdownConfiguration(tuiConfiguration)
+            streamingComponent.updateContent(streamingMessage)
+            chatContainer.addChild(streamingComponent)
+        }
+        scheduleRender()
     }
 
     @MainActor
@@ -1353,13 +1459,21 @@ public final class InteractiveMode {
 
     @MainActor
     private func showHookError(_ hookPath: String, _ error: String, _ stack: String? = nil) {
-        let errorText = Text(theme.fg(.error, "Hook \"\(hookPath)\" error: \(error)"), paddingX: 1, paddingY: 0)
+        let errorText = Text(
+            theme.fg(.error, "Hook \"\(hookPath)\" error: \(error)"),
+            paddingX: tuiConfiguration.outputPad,
+            paddingY: 0
+        )
         chatContainer.addChild(errorText)
         if let stack, !stack.isEmpty {
             let lines = stack.split(separator: "\n").dropFirst()
             if !lines.isEmpty {
                 let formatted = lines.map { theme.fg(.dim, "  \($0.trimmingCharacters(in: .whitespaces))") }.joined(separator: "\n")
-                chatContainer.addChild(Text(formatted, paddingX: 1, paddingY: 0))
+                chatContainer.addChild(Text(
+                    formatted,
+                    paddingX: tuiConfiguration.outputPad,
+                    paddingY: 0
+                ))
             }
         }
         scheduleRender()
@@ -1533,7 +1647,11 @@ public final class InteractiveMode {
                 updatePendingMessagesDisplay()
                 scheduleRender()
             } else if case .assistant(let assistant) = message {
-                streamingComponent = AssistantMessageComponent(hideThinkingBlock: hideThinkingBlock)
+                streamingComponent = AssistantMessageComponent(
+                    hideThinkingBlock: hideThinkingBlock,
+                    markdownConfiguration: tuiConfiguration,
+                    isStreaming: true
+                )
                 streamingMessage = assistant
                 if let streamingComponent {
                     chatContainer.addChild(streamingComponent)
@@ -1572,6 +1690,7 @@ public final class InteractiveMode {
 
         case .messageEnd(let message):
             if case .assistant(let assistant) = message {
+                streamingComponent?.setStreaming(false)
                 streamingComponent?.updateContent(assistant)
                 if assistant.stopReason == .aborted || assistant.stopReason == .error {
                     let errorMessage = assistant.errorMessage ?? "Request failed"
@@ -1727,9 +1846,13 @@ public final class InteractiveMode {
         switch message {
         case .user(let user):
             let text = extractUserContentText(user.content)
-            chatContainer.addChild(UserMessageComponent(text: text))
+            chatContainer.addChild(UserMessageComponent(text: text, markdownConfiguration: tuiConfiguration))
         case .assistant(let assistant):
-            let component = AssistantMessageComponent(message: assistant, hideThinkingBlock: hideThinkingBlock)
+            let component = AssistantMessageComponent(
+                message: assistant,
+                hideThinkingBlock: hideThinkingBlock,
+                markdownConfiguration: tuiConfiguration
+            )
             chatContainer.addChild(component)
         case .toolResult:
             break
@@ -2317,6 +2440,9 @@ public final class InteractiveMode {
         footerBranchUnsubscribe = nil
         footerDataProvider?.dispose()
         footerDataProvider = nil
+        // Consume delayed terminal capability replies while input is still in raw mode. This
+        // prevents them from reaching the parent shell after terminal state is restored.
+        tui?.terminal.drainInput(maxMs: 100, idleMs: 10)
         tui?.stop()
 
         if !fromSignal {
@@ -2974,7 +3100,16 @@ public final class InteractiveMode {
             quietStartup: settingsManager.getQuietStartup(),
             doubleEscapeAction: settingsManager.getDoubleEscapeAction(),
             editorPaddingX: settingsManager.getEditorPaddingX(),
-            autocompleteMaxVisible: settingsManager.getAutocompleteMaxVisible()
+            autocompleteMaxVisible: settingsManager.getAutocompleteMaxVisible(),
+            tuiMode: tuiConfiguration.mode,
+            fullscreenScrollbar: FullscreenScrollbarMode(
+                rawValue: settingsManager.getFullscreenScrollbar()
+            ) ?? .auto,
+            mouseWheelStep: settingsManager.getMouseWheelStep(),
+            mermaidEnabled: settingsManager.getMermaidEnabled(),
+            mermaidRenderWhileStreaming: settingsManager.getMermaidRenderWhileStreaming(),
+            latexEnabled: settingsManager.getLatexEnabled(),
+            outputPad: settingsManager.getOutputPad()
         )
 
         showSelector { done in
@@ -3054,13 +3189,49 @@ public final class InteractiveMode {
                     self?.editor?.setAutocompleteMaxVisible(maxVisible)
                     self?.scheduleRender()
                 },
+                onTuiModeChange: { [weak self] mode in
+                    guard let self else { return }
+                    if self.switchTuiMode(mode) {
+                        settingsManager.setTuiMode(mode.rawValue)
+                    } else {
+                        self.showStatus("Close active overlays before changing TUI mode")
+                    }
+                },
+                onFullscreenScrollbarChange: { [weak self] mode in
+                    settingsManager.setFullscreenScrollbar(mode.rawValue)
+                    self?.setFullscreenScrollbar(mode)
+                },
+                onMouseWheelStepChange: { [weak self] step in
+                    settingsManager.setMouseWheelStep(step)
+                    self?.setMouseWheelStep(step)
+                },
+                onMermaidEnabledChange: { [weak self] enabled in
+                    settingsManager.setMermaidEnabled(enabled)
+                    self?.tuiConfiguration.mermaidEnabled = enabled
+                    self?.refreshMarkdownRendering()
+                },
+                onMermaidRenderWhileStreamingChange: { [weak self] enabled in
+                    settingsManager.setMermaidRenderWhileStreaming(enabled)
+                    self?.tuiConfiguration.mermaidRenderWhileStreaming = enabled
+                    self?.refreshMarkdownRendering()
+                },
+                onLatexEnabledChange: { [weak self] enabled in
+                    settingsManager.setLatexEnabled(enabled)
+                    self?.tuiConfiguration.latexEnabled = enabled
+                    self?.refreshMarkdownRendering()
+                },
+                onOutputPadChange: { [weak self] padding in
+                    settingsManager.setOutputPad(padding)
+                    self?.tuiConfiguration.outputPad = padding == 0 ? 0 : 1
+                    self?.refreshMarkdownRendering()
+                },
                 onCancel: {
                     done()
                 }
             )
 
             let selector = SettingsSelectorComponent(config: config, callbacks: callbacks)
-            return (component: selector, focus: selector.getSettingsList())
+            return (component: selector, focus: selector)
         }
     }
 
@@ -3175,7 +3346,7 @@ public final class InteractiveMode {
         if !session.scopedModels.isEmpty {
             return session.scopedModels.map { $0.model }
         }
-        session.modelRegistry.refresh()
+        _ = await session.modelRegistry.refresh(ModelsRefreshOptions(allowNetwork: false))
         return await session.modelRegistry.getAvailable()
     }
 
@@ -3216,7 +3387,7 @@ public final class InteractiveMode {
     @MainActor
     private func showModelsSelector() async {
         guard let session else { return }
-        session.modelRegistry.refresh()
+        _ = await session.modelRegistry.refresh(ModelsRefreshOptions(allowNetwork: false))
         let allModels = await session.modelRegistry.getAvailable()
 
         guard !allModels.isEmpty else {
@@ -3624,7 +3795,7 @@ public final class InteractiveMode {
 
         do {
             try await authStorage.login(provider, callbacks: callbacks)
-            session?.modelRegistry.refresh()
+            _ = await session?.modelRegistry.refresh(ModelsRefreshOptions(allowNetwork: false))
             await session?.refreshActiveModel()
             restoreEditor()
             showStatus("Logged in to \(providerName). Credentials saved to \(getAuthPath())")
@@ -3641,7 +3812,7 @@ public final class InteractiveMode {
     private func handleOAuthLogout(_ provider: OAuthProvider, authStorage: AuthStorage) async {
         let providerName = getOAuthProviders().first { $0.id == provider }?.name ?? provider.rawValue
         authStorage.logout(provider)
-        session?.modelRegistry.refresh()
+        _ = await session?.modelRegistry.refresh(ModelsRefreshOptions(allowNetwork: false))
         await session?.refreshActiveModel()
         showStatus("Logged out of \(providerName)")
     }
@@ -3670,7 +3841,11 @@ public final class InteractiveMode {
 
         do {
             try copyToClipboard(text)
-            showStatus("Copied last agent message to clipboard")
+            if tui?.mode == .altScreen {
+                altScreenRenderer?.flash("Copied!")
+            } else {
+                showStatus("Copied last agent message to clipboard")
+            }
         } catch {
             showError(String(describing: error))
         }
@@ -4098,7 +4273,11 @@ public final class InteractiveMode {
 
     public func showError(_ errorMessage: String) {
         chatContainer.addChild(Spacer(1))
-        chatContainer.addChild(Text(theme.fg(.error, "Error: \(errorMessage)"), paddingX: 1, paddingY: 0))
+        chatContainer.addChild(Text(
+            theme.fg(.error, "Error: \(errorMessage)"),
+            paddingX: tuiConfiguration.outputPad,
+            paddingY: 0
+        ))
         scheduleRender()
     }
 

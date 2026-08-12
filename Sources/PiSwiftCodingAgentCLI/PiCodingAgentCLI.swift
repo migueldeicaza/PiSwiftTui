@@ -13,71 +13,20 @@ struct PiCodingAgentCLI: AsyncParsableCommand {
         commandName: "pi-coding-agent",
         abstract: "AI coding assistant",
         discussion: Self.helpDiscussion(),
-        version: VERSION
+        version: VERSION,
+        subcommands: [
+            SessionSubcommand.self,
+            PackageSubcommand.self,
+            ConfigSubcommand.self,
+            AuthSubcommand.self,
+            UpdateSubcommand.self,
+        ],
+        defaultSubcommand: SessionSubcommand.self
     )
 
-    @OptionGroup var cli: CLIOptions
-
-    mutating func run() async throws {
+    static func runSession(_ cli: CLIOptions) async throws {
         markCodingAgentEnvironment()
         time("start")
-        let offline = cli.offline || CLIOptions.isOfflineEnvironmentEnabled()
-        if cli.rawMessages.first == "package" {
-            let args = Array(cli.rawMessages.dropFirst())
-            if await handlePackageCommand(
-                args,
-                approve: cli.approve,
-                noApprove: cli.noApprove,
-                noExtensions: cli.noExtensions,
-                offline: offline
-            ) {
-                if let exitCode = consumePackageCommandExitCode() {
-                    Darwin.exit(exitCode)
-                }
-                return
-            }
-        }
-        if cli.rawMessages.first == "config" {
-            let cwd = FileManager.default.currentDirectoryPath
-            let agentDir = getAgentDir()
-            let startupSettingsManager = SettingsManager.create(cwd, agentDir, projectTrusted: false)
-            await runFirstTimeSetupIfNeeded(
-                settingsManager: startupSettingsManager,
-                isInteractive: true
-            )
-            let authStorage = AuthStorage.create(getAuthPath())
-            let modelRegistry = ModelRegistry(authStorage, agentDir)
-            let trustChoice = projectTrustChoice(approve: cli.approve, noApprove: cli.noApprove)
-            let trustContext = await resolveProjectTrustForCLI(
-                cwd: cwd,
-                agentDir: agentDir,
-                modelRegistry: modelRegistry,
-                eventBus: createEventBus(),
-                choice: trustChoice,
-                persistChoice: trustChoice != nil,
-                noExtensions: cli.noExtensions,
-                mode: .tui,
-                hasUI: true
-            )
-            let settingsManager = trustContext.settingsManager
-            reportSettingsErrors(settingsManager, context: "config command")
-            let packageManager = DefaultPackageManager(
-                cwd: cwd,
-                agentDir: agentDir,
-                settingsManager: settingsManager,
-                projectTrusted: trustContext.trust.trusted,
-                offline: offline
-            )
-            let resolvedPaths = try await packageManager.resolve()
-            await selectConfig(
-                resolvedPaths: resolvedPaths,
-                settingsManager: settingsManager,
-                cwd: cwd,
-                agentDir: agentDir,
-                initialProjectMode: cli.configLocal
-            )
-            return
-        }
 
         let migrationResult = runMigrations()
         let migratedProviders = migrationResult.migratedAuthProviders
@@ -111,7 +60,7 @@ struct PiCodingAgentCLI: AsyncParsableCommand {
                 print("Exported to: \(result)")
                 return
             } catch {
-                let message = (error as NSError).localizedDescription
+                let message = error.localizedDescription
                 fputs("Error: \(message)\n", stderr)
                 Darwin.exit(1)
             }
@@ -643,7 +592,8 @@ struct PiCodingAgentCLI: AsyncParsableCommand {
                     setToolUIContext: customToolsResult.setUIContext,
                     setToolSendMessageHandler: customToolsResult.setSendMessageHandler,
                     fdPath: fdPath,
-                    verbose: parsed.verbose == true
+                    verbose: parsed.verbose == true,
+                    tuiMode: cli.parsedTuiModeOverride
                 )
             }
             await interactiveMode.start(
@@ -718,6 +668,14 @@ Examples:
   \(APP_NAME) package update [source]
   \(APP_NAME) package list
 
+  # Check or export credentials
+  \(APP_NAME) auth check --provider openai
+  \(APP_NAME) auth print-api-key --provider openai
+  \(APP_NAME) auth print-bearer-token --provider openai-codex
+
+  # Refresh model catalogs
+  \(APP_NAME) update --models
+
 Environment Variables:
   ANTHROPIC_API_KEY       - Anthropic Claude API key
   ANTHROPIC_OAUTH_TOKEN   - Anthropic OAuth token (alternative to API key)
@@ -790,7 +748,40 @@ Available Tools (default: read, bash, edit, write):
             result.append(arg)
             i += 1
         }
-        return result
+        return moveLeadingSubcommandToFront(result)
+    }
+
+    private static func moveLeadingSubcommandToFront(_ args: [String]) -> [String] {
+        let valueOptions: Set<String> = [
+            "--provider", "--model", "--api-key", "--system-prompt",
+            "--append-system-prompt", "--mode", "--tui-mode", "--thinking", "--session",
+            "--session-id", "--session-dir", "--models", "-m", "--tools",
+            "--exclude-tools", "--hook", "--tool", "--export", "--skills",
+            "--theme", "--list-models-search",
+        ]
+        var index = 0
+        while index < args.count {
+            let argument = args[index]
+            if argument.hasPrefix("-") {
+                if valueOptions.contains(argument), index + 1 < args.count {
+                    index += 2
+                } else {
+                    index += 1
+                }
+                continue
+            }
+            break
+        }
+
+        guard index < args.count,
+              ["package", "config", "auth", "update"].contains(args[index]),
+              index > 0 else {
+            return args
+        }
+        var routed = args
+        let subcommand = routed.remove(at: index)
+        routed.insert(subcommand, at: 0)
+        return routed
     }
 }
 

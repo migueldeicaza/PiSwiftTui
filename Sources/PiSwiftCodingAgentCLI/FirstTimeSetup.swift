@@ -61,8 +61,15 @@ func presentFirstTimeSetup(settingsManager: SettingsManager) async -> FirstTimeS
     await withCheckedContinuation { continuation in
         Task { @MainActor in
             initTheme(settingsManager.getTheme(), enableWatcher: false)
-            let initialTheme = settingsManager.getTheme() ?? "dark"
             let ui = TUI(terminal: ProcessTerminal())
+            ui.start()
+            let initialTheme: String
+            if let configuredTheme = settingsManager.getTheme() {
+                initialTheme = configuredTheme
+            } else {
+                initialTheme = await detectTerminalTheme(ui: ui, timeoutMs: 100).rawValue
+            }
+            _ = setTheme(initialTheme, enableWatcher: false)
             var resolved = false
 
             let finish: (FirstTimeSetupResult?) -> Void = { result in
@@ -89,7 +96,7 @@ func presentFirstTimeSetup(settingsManager: SettingsManager) async -> FirstTimeS
 
             ui.addChild(component)
             ui.setFocus(component)
-            ui.start()
+            ui.requestRender()
         }
     }
 }

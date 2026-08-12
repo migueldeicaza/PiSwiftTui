@@ -207,7 +207,13 @@ public struct RpcHookError: Sendable {
 public struct RpcAgentEvent: Sendable {
     public var type: String
     public var message: AgentMessage?
+    /// Kind of the streamed assistant delta (`text_delta`, `tool_call_start`, …), taken from the
+    /// `assistantMessageEvent.type` field.
     public var assistantMessageEvent: String?
+    /// Index of the content block this delta belongs to, for ordering reassembly.
+    public var assistantMessageContentIndex: Int?
+    /// Incremental payload for `text_delta` / `thinking_delta` / `tool_call_delta` events.
+    public var assistantMessageDelta: String?
     public var messages: [AgentMessage]?
     public var toolResults: [ToolResultMessage]?
     public var toolCallId: String?
@@ -221,6 +227,8 @@ public struct RpcAgentEvent: Sendable {
         type: String,
         message: AgentMessage? = nil,
         assistantMessageEvent: String? = nil,
+        assistantMessageContentIndex: Int? = nil,
+        assistantMessageDelta: String? = nil,
         messages: [AgentMessage]? = nil,
         toolResults: [ToolResultMessage]? = nil,
         toolCallId: String? = nil,
@@ -233,6 +241,8 @@ public struct RpcAgentEvent: Sendable {
         self.type = type
         self.message = message
         self.assistantMessageEvent = assistantMessageEvent
+        self.assistantMessageContentIndex = assistantMessageContentIndex
+        self.assistantMessageDelta = assistantMessageDelta
         self.messages = messages
         self.toolResults = toolResults
         self.toolCallId = toolCallId
@@ -902,8 +912,17 @@ private func decodeAgentEvent(_ dict: [String: Any]) -> RpcAgentEvent? {
     case "message_update":
         let messageDict = dict["message"] as? [String: Any]
         let message = messageDict.flatMap { decodeAgentMessage($0) }
-        let updateType = dict["assistantMessageEvent"] as? String
-        return RpcAgentEvent(type: type, message: message, assistantMessageEvent: updateType)
+        // v0.84.1 (#7290): `message_update` no longer carries a cumulative `message` snapshot.
+        // `assistantMessageEvent` is now an object; clients assemble deltas between
+        // `message_start` and `message_end`, and `message_end` remains authoritative.
+        let eventObject = dict["assistantMessageEvent"] as? [String: Any]
+        return RpcAgentEvent(
+            type: type,
+            message: message,
+            assistantMessageEvent: eventObject?["type"] as? String,
+            assistantMessageContentIndex: eventObject?["contentIndex"] as? Int,
+            assistantMessageDelta: eventObject?["delta"] as? String
+        )
     case "message_end":
         let messageDict = dict["message"] as? [String: Any]
         let message = messageDict.flatMap { decodeAgentMessage($0) }

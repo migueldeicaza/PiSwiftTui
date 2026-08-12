@@ -2,6 +2,7 @@ import ArgumentParser
 import Foundation
 import PiSwiftAgent
 import PiSwiftCodingAgent
+import PiSwiftCodingAgentTui
 
 struct CLIOptions: ParsableArguments {
     @Option(help: "Provider name")
@@ -22,6 +23,9 @@ struct CLIOptions: ParsableArguments {
 
     @Option(help: "Output mode: text (default), json, or rpc")
     var mode: String?
+
+    @Option(name: .customLong("tui-mode"), help: "TUI mode: regular (default) or fullscreen")
+    private var tuiModeOption: String?
 
     @Flag(name: [.customShort("c"), .customLong("continue")], help: "Continue previous session")
     var continueSession: Bool = false
@@ -117,9 +121,33 @@ struct CLIOptions: ParsableArguments {
 
     @Argument(help: "Messages and @file paths")
     var rawMessages: [String] = []
+
+    mutating func validate() throws {
+        guard tuiModeOption == nil || InteractiveTuiMode(rawValue: tuiModeOption ?? "") != nil else {
+            throw ValidationError("--tui-mode requires regular or fullscreen")
+        }
+    }
 }
 
 extension CLIOptions {
+    var tuiMode: String {
+        tuiModeOption ?? InteractiveTuiMode.regular.rawValue
+    }
+
+    var parsedTuiMode: InteractiveTuiMode {
+        InteractiveTuiMode(rawValue: tuiMode) ?? .regular
+    }
+
+    var parsedTuiModeOverride: InteractiveTuiMode? {
+        tuiModeOption.flatMap(InteractiveTuiMode.init(rawValue:))
+    }
+
+    func resolvedTuiMode(settingsManager: SettingsManager) -> InteractiveTuiMode {
+        parsedTuiModeOverride
+            ?? InteractiveTuiMode(rawValue: settingsManager.getTuiMode())
+            ?? .regular
+    }
+
     func toArgs() -> Args {
         var result = Args()
 

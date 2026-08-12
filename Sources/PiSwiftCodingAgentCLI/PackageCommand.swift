@@ -1,4 +1,5 @@
 import Foundation
+import PiSwiftAI
 import PiSwiftCodingAgent
 
 private enum PackageCommand: String {
@@ -16,35 +17,18 @@ private struct PackageCommandOptions {
     var invalidOption: String?
 }
 
-/// SAFETY: the optional exit code is read and written only while holding `lock`;
-/// values are copied `Int32`s.
-private final class PackageCommandExitCodeStore: @unchecked Sendable {
-    private let lock = NSLock()
-    private var code: Int32?
-
-    func consume() -> Int32? {
-        lock.lock()
-        defer { lock.unlock() }
-        defer { code = nil }
-        return code
-    }
-
-    func set(_ value: Int32) {
-        lock.lock()
-        code = value
-        lock.unlock()
-    }
-}
-
-private let packageCommandExitCodeStore = PackageCommandExitCodeStore()
+private let packageCommandExitCodeStore = LockedState<Int32?>(nil)
 
 @discardableResult
 func consumePackageCommandExitCode() -> Int32? {
-    packageCommandExitCodeStore.consume()
+    packageCommandExitCodeStore.withLock { code in
+        defer { code = nil }
+        return code
+    }
 }
 
 private func setPackageCommandExitCode(_ code: Int32) {
-    packageCommandExitCodeStore.set(code)
+    packageCommandExitCodeStore.withLock { $0 = code }
 }
 
 private func packageCommandUsage(_ command: PackageCommand) -> String {

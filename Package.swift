@@ -56,6 +56,7 @@ let package = Package(
                 .product(name: "PiSwiftAgent", package: "PiSwift"),
                 .product(name: "PiSwiftCodingAgent", package: "PiSwift"),
                 "PiSwiftCodingAgentTui",
+                "PiSwiftCodingAgentCLI",
                 .product(name: "MiniTui", package: "MiniTui"),
             ],
             swiftSettings: strictConcurrencySettings

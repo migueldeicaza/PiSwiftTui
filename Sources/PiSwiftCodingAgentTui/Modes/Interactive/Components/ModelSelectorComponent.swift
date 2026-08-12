@@ -96,7 +96,12 @@ public final class ModelSelectorComponent: Container, SystemCursorAware {
                     ModelItem(provider: scoped.model.provider, id: scoped.model.id, model: scoped.model)
                 }
             } else {
-                modelRegistry.refresh()
+                // Local-only refresh: the previous synchronous `refresh()` just re-read
+                // models.json, so this preserves today's behavior exactly. Opening the picker must
+                // not block on a network catalog fetch — upstream (#7443, #7153) renders cached
+                // models immediately and refreshes in the background with a cancellable signal.
+                // That interactive behavior lands in the follow-up call-site work order.
+                _ = await modelRegistry.refresh(ModelsRefreshOptions(allowNetwork: false))
                 errorMessage = modelRegistry.getError()
                 let available = await modelRegistry.getAvailable()
                 items = available.map { model in

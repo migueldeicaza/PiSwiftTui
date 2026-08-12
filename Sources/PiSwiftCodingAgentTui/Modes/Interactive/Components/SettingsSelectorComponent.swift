@@ -34,6 +34,13 @@ public struct SettingsConfig: Sendable {
     public var doubleEscapeAction: String
     public var editorPaddingX: Int
     public var autocompleteMaxVisible: Int
+    public var tuiMode: InteractiveTuiMode
+    public var fullscreenScrollbar: FullscreenScrollbarMode
+    public var mouseWheelStep: Int
+    public var mermaidEnabled: Bool
+    public var mermaidRenderWhileStreaming: Bool
+    public var latexEnabled: Bool
+    public var outputPad: Int
 
     public init(
         autoCompact: Bool,
@@ -54,7 +61,14 @@ public struct SettingsConfig: Sendable {
         quietStartup: Bool,
         doubleEscapeAction: String,
         editorPaddingX: Int,
-        autocompleteMaxVisible: Int
+        autocompleteMaxVisible: Int,
+        tuiMode: InteractiveTuiMode,
+        fullscreenScrollbar: FullscreenScrollbarMode,
+        mouseWheelStep: Int,
+        mermaidEnabled: Bool,
+        mermaidRenderWhileStreaming: Bool,
+        latexEnabled: Bool,
+        outputPad: Int
     ) {
         self.autoCompact = autoCompact
         self.showImages = showImages
@@ -75,6 +89,13 @@ public struct SettingsConfig: Sendable {
         self.doubleEscapeAction = doubleEscapeAction
         self.editorPaddingX = editorPaddingX
         self.autocompleteMaxVisible = autocompleteMaxVisible
+        self.tuiMode = tuiMode
+        self.fullscreenScrollbar = fullscreenScrollbar
+        self.mouseWheelStep = mouseWheelStep
+        self.mermaidEnabled = mermaidEnabled
+        self.mermaidRenderWhileStreaming = mermaidRenderWhileStreaming
+        self.latexEnabled = latexEnabled
+        self.outputPad = outputPad
     }
 }
 
@@ -97,6 +118,13 @@ public struct SettingsCallbacks {
     public var onDoubleEscapeActionChange: (String) -> Void
     public var onEditorPaddingXChange: (Int) -> Void
     public var onAutocompleteMaxVisibleChange: (Int) -> Void
+    public var onTuiModeChange: (InteractiveTuiMode) -> Void
+    public var onFullscreenScrollbarChange: (FullscreenScrollbarMode) -> Void
+    public var onMouseWheelStepChange: (Int) -> Void
+    public var onMermaidEnabledChange: (Bool) -> Void
+    public var onMermaidRenderWhileStreamingChange: (Bool) -> Void
+    public var onLatexEnabledChange: (Bool) -> Void
+    public var onOutputPadChange: (Int) -> Void
     public var onCancel: () -> Void
 
     public init(
@@ -118,6 +146,13 @@ public struct SettingsCallbacks {
         onDoubleEscapeActionChange: @escaping (String) -> Void,
         onEditorPaddingXChange: @escaping (Int) -> Void,
         onAutocompleteMaxVisibleChange: @escaping (Int) -> Void,
+        onTuiModeChange: @escaping (InteractiveTuiMode) -> Void,
+        onFullscreenScrollbarChange: @escaping (FullscreenScrollbarMode) -> Void,
+        onMouseWheelStepChange: @escaping (Int) -> Void,
+        onMermaidEnabledChange: @escaping (Bool) -> Void,
+        onMermaidRenderWhileStreamingChange: @escaping (Bool) -> Void,
+        onLatexEnabledChange: @escaping (Bool) -> Void,
+        onOutputPadChange: @escaping (Int) -> Void,
         onCancel: @escaping () -> Void
     ) {
         self.onAutoCompactChange = onAutoCompactChange
@@ -138,6 +173,13 @@ public struct SettingsCallbacks {
         self.onDoubleEscapeActionChange = onDoubleEscapeActionChange
         self.onEditorPaddingXChange = onEditorPaddingXChange
         self.onAutocompleteMaxVisibleChange = onAutocompleteMaxVisibleChange
+        self.onTuiModeChange = onTuiModeChange
+        self.onFullscreenScrollbarChange = onFullscreenScrollbarChange
+        self.onMouseWheelStepChange = onMouseWheelStepChange
+        self.onMermaidEnabledChange = onMermaidEnabledChange
+        self.onMermaidRenderWhileStreamingChange = onMermaidRenderWhileStreamingChange
+        self.onLatexEnabledChange = onLatexEnabledChange
+        self.onOutputPadChange = onOutputPadChange
         self.onCancel = onCancel
     }
 }
@@ -190,8 +232,11 @@ private final class SelectSubmenu: Container {
     }
 }
 
-public final class SettingsSelectorComponent: Container {
+public final class SettingsSelectorComponent: Container, SystemCursorAware {
     private let settingsList: SettingsList
+    public var usesSystemCursor: Bool = false {
+        didSet { settingsList.usesSystemCursor = usesSystemCursor }
+    }
 
     public init(config: SettingsConfig, callbacks: SettingsCallbacks) {
         let supportsImages = getCapabilities().images != nil
@@ -268,11 +313,60 @@ public final class SettingsSelectorComponent: Container {
                 values: ["3", "5", "7", "10", "15", "20"]
             ),
             SettingItem(
+                id: "tui-mode",
+                label: "TUI mode",
+                description: "Interface layout; fullscreen mode is experimental",
+                currentValue: config.tuiMode.rawValue,
+                values: InteractiveTuiMode.allCases.map(\.rawValue)
+            ),
+            SettingItem(
+                id: "fullscreen-scrollbar",
+                label: "Fullscreen scrollbar",
+                description: "Scrollbar behavior in fullscreen mode",
+                currentValue: config.fullscreenScrollbar.rawValue,
+                values: FullscreenScrollbarMode.allCases.map(\.rawValue)
+            ),
+            SettingItem(
+                id: "mouse-wheel-step",
+                label: "Mouse wheel step",
+                description: "Lines scrolled for each mouse wheel event",
+                currentValue: String(config.mouseWheelStep),
+                values: ["1", "3", "5", "10"]
+            ),
+            SettingItem(
+                id: "mermaid-enabled",
+                label: "Mermaid diagrams",
+                description: "Render supported Mermaid diagrams as themed Unicode",
+                currentValue: config.mermaidEnabled ? "true" : "false",
+                values: ["true", "false"]
+            ),
+            SettingItem(
+                id: "mermaid-streaming",
+                label: "Mermaid while streaming",
+                description: "Render Mermaid diagrams before the response is complete",
+                currentValue: config.mermaidRenderWhileStreaming ? "true" : "false",
+                values: ["true", "false"]
+            ),
+            SettingItem(
+                id: "latex-enabled",
+                label: "LaTeX rendering",
+                description: "Render supported LaTeX expressions as Unicode",
+                currentValue: config.latexEnabled ? "true" : "false",
+                values: ["true", "false"]
+            ),
+            SettingItem(
                 id: "editor-padding-x",
                 label: "Editor padding",
                 description: "Horizontal padding inside the prompt editor (0-3)",
                 currentValue: String(config.editorPaddingX),
                 values: ["0", "1", "2", "3"]
+            ),
+            SettingItem(
+                id: "output-padding",
+                label: "Output padding",
+                description: "Horizontal padding for chat messages and errors",
+                currentValue: String(config.outputPad),
+                values: ["0", "1"]
             ),
             SettingItem(
                 id: "thinking",
@@ -416,6 +510,28 @@ public final class SettingsSelectorComponent: Container {
                     if let value = Int(newValue) {
                         callbacks.onAutocompleteMaxVisibleChange(value)
                     }
+                case "tui-mode":
+                    if let value = InteractiveTuiMode(rawValue: newValue) {
+                        callbacks.onTuiModeChange(value)
+                    }
+                case "fullscreen-scrollbar":
+                    if let value = FullscreenScrollbarMode(rawValue: newValue) {
+                        callbacks.onFullscreenScrollbarChange(value)
+                    }
+                case "mouse-wheel-step":
+                    if let value = Int(newValue) {
+                        callbacks.onMouseWheelStepChange(value)
+                    }
+                case "mermaid-enabled":
+                    callbacks.onMermaidEnabledChange(newValue == "true")
+                case "mermaid-streaming":
+                    callbacks.onMermaidRenderWhileStreamingChange(newValue == "true")
+                case "latex-enabled":
+                    callbacks.onLatexEnabledChange(newValue == "true")
+                case "output-padding":
+                    if let value = Int(newValue) {
+                        callbacks.onOutputPadChange(value)
+                    }
                 default:
                     break
                 }
@@ -432,5 +548,13 @@ public final class SettingsSelectorComponent: Container {
 
     public func getSettingsList() -> SettingsList {
         settingsList
+    }
+
+    public override func handleInput(_ data: String) {
+        // SettingsList treats Space as activation before it reaches its search input. Ignore the
+        // separator while search is active. The fuzzy matcher still matches a multi-word label
+        // when the query words are concatenated (for example, "outputpadding").
+        if data == " " { return }
+        settingsList.handleInput(data)
     }
 }

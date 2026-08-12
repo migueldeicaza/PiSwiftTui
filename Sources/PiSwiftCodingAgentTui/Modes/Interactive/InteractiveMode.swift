@@ -284,6 +284,8 @@ public final class InteractiveMode {
     private var hookShortcuts: [KeyId: HookShortcut] = [:]
     private var keybindings: KeybindingsManager = KeybindingsManager.inMemory()
     private var selectorCancel: (() -> Void)?
+    /// Startup catalog refresh; cancelled on shutdown so it cannot outlive the session.
+    private var backgroundCatalogRefreshTask: Task<Void, Never>?
     private var setToolUIContext: (HookUIContext, Bool) -> Void = { _, _ in }
     private var setToolSendMessageHandler: (@Sendable (_ handler: @escaping HookSendMessageHandler) -> Void) = { _ in }
 
@@ -365,6 +367,7 @@ public final class InteractiveMode {
     ) async {
         await initializeIfNeeded()
         registerShutdownSignalHandlers()
+        startBackgroundCatalogRefresh()
         if let session {
             pendingResourceDisplayOptions = ResourceDisplayOptions(
                 extensionPaths: session.resourceLoader.getExtensions().paths,
@@ -383,6 +386,25 @@ public final class InteractiveMode {
 
         await withCheckedContinuation { continuation in
             self.exitContinuation = continuation
+        }
+    }
+
+    /// Fire-and-forget catalog refresh at startup. Upstream moved this out of initialization
+    /// deliberately: startup renders from the cached catalogs and never waits on the network.
+    /// Skipped entirely when `PI_OFFLINE=1`.
+    @MainActor
+    private func startBackgroundCatalogRefresh() {
+        guard let session, !isOfflineEnvironmentEnabled() else { return }
+        backgroundCatalogRefreshTask = Task { @MainActor [weak self] in
+            _ = await runBoundedCatalogRefresh(
+                registry: session.modelRegistry,
+                signal: CancellationToken()
+            )
+            // Failures are intentionally silent here: startup must not nag about a stale catalog.
+            // The cached models stay on screen and the next explicit refresh reports errors.
+            guard let self else { return }
+            self.footer?.invalidate()
+            self.ui.requestRender()
         }
     }
 
@@ -2440,6 +2462,8 @@ public final class InteractiveMode {
         footerBranchUnsubscribe = nil
         footerDataProvider?.dispose()
         footerDataProvider = nil
+        backgroundCatalogRefreshTask?.cancel()
+        backgroundCatalogRefreshTask = nil
         // Consume delayed terminal capability replies while input is still in raw mode. This
         // prevents them from reaching the parent shell after terminal state is restored.
         tui?.terminal.drainInput(maxMs: 100, idleMs: 10)
@@ -3053,8 +3077,14 @@ public final class InteractiveMode {
     private func showSelector(_ builder: (_ done: @escaping () -> Void) -> (component: Component, focus: Component)) {
         guard let editorContainer, let tui else { return }
 
+        // Holds the component so `done` can tear down its background work. Every exit path
+        // (select, cancel, ctrl+C) funnels through `done`, so an in-flight catalog refresh is
+        // always cancelled exactly once (#7153).
+        let closable = SelectorCloseBox()
+
         let done: () -> Void = { [weak self] in
             guard let self else { return }
+            closable.closeOnce()
             self.selectorCancel = nil
             editorContainer.clear()
             if let editor = self.editor {
@@ -3066,6 +3096,7 @@ public final class InteractiveMode {
 
         selectorCancel = done
         let result = builder(done)
+        closable.component = result.component as? SelectorClosable
         editorContainer.clear()
         editorContainer.addChild(result.component)
         tui.setFocus(result.focus)
@@ -3315,39 +3346,34 @@ public final class InteractiveMode {
         showModelSelector(initialSearchInput: trimmed)
     }
 
+    /// `/model <name>`. Checks the cached catalogs first and only pays for a network refresh when
+    /// the name is not already known (#7443) — a hit never waits on the network. A scoped session
+    /// never refreshes at all, because its model set is fixed.
+    @MainActor
     private func findExactModelMatch(_ searchTerm: String) async -> Model? {
-        let term = searchTerm.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !term.isEmpty else { return nil }
+        guard let session else { return nil }
+        guard let reference = ModelReference(searchTerm) else { return nil }
 
-        var targetProvider: String?
-        var targetModelId = ""
-
-        if let slashIndex = term.firstIndex(of: "/") {
-            targetProvider = String(term[..<slashIndex]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            targetModelId = String(term[term.index(after: slashIndex)...]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        } else {
-            targetModelId = term.lowercased()
+        let scoped = session.scopedModels
+        if !scoped.isEmpty {
+            return reference.exactMatch(in: scoped.map { $0.model })
         }
 
-        guard !targetModelId.isEmpty else { return nil }
-
-        let models = await getModelCandidates()
-        let exactMatches = models.filter { model in
-            let idMatch = model.id.lowercased() == targetModelId
-            let providerMatch = targetProvider == nil || model.provider.lowercased() == targetProvider
-            return idMatch && providerMatch
+        let cached = await session.modelRegistry.getAvailable()
+        if let cachedMatch = reference.exactMatch(in: cached) {
+            return cachedMatch
         }
 
-        return exactMatches.count == 1 ? exactMatches[0] : nil
-    }
-
-    private func getModelCandidates() async -> [Model] {
-        guard let session else { return [] }
-        if !session.scopedModels.isEmpty {
-            return session.scopedModels.map { $0.model }
+        showStatus("Refreshing model catalogs…")
+        let outcome = await runBoundedCatalogRefresh(
+            registry: session.modelRegistry,
+            signal: CancellationToken()
+        )
+        if let warning = CatalogRefreshStatus.exactMatchWarning(outcome) {
+            showWarning(warning)
         }
-        _ = await session.modelRegistry.refresh(ModelsRefreshOptions(allowNetwork: false))
-        return await session.modelRegistry.getAvailable()
+
+        return reference.exactMatch(in: await session.modelRegistry.getAvailable())
     }
 
     @MainActor
@@ -3387,8 +3413,9 @@ public final class InteractiveMode {
     @MainActor
     private func showModelsSelector() async {
         guard let session else { return }
-        _ = await session.modelRegistry.refresh(ModelsRefreshOptions(allowNetwork: false))
-        let allModels = await session.modelRegistry.getAvailable()
+        // Render whatever is cached immediately; the catalogs refresh in the background below
+        // and the selector is updated in place (#7153).
+        var allModels = await session.modelRegistry.getAvailable()
 
         guard !allModels.isEmpty else {
             showStatus("No models available")
@@ -3401,13 +3428,22 @@ public final class InteractiveMode {
         var enabledModelIds: [String] = []
         var hasFilter = false
 
+        /// Re-resolves the configured `enabledModels` patterns against the registry. Used for the
+        /// initial render and again after a background refresh brings in new models.
+        let configuredEnabledIds: () async -> [String] = {
+            guard let patterns = session.settingsManager.getEnabledModels(), !patterns.isEmpty else {
+                return []
+            }
+            let scoped = await resolveModelScope(patterns, session.modelRegistry)
+            return scoped.map { "\($0.model.provider)/\($0.model.id)" }
+        }
+
         if hasSessionScope {
             enabledModelIds = sessionScopedModels.map { "\($0.model.provider)/\($0.model.id)" }
             hasFilter = true
         } else if let patterns = session.settingsManager.getEnabledModels(), !patterns.isEmpty {
             hasFilter = true
-            let scoped = await resolveModelScope(patterns, session.modelRegistry)
-            enabledModelIds = scoped.map { "\($0.model.provider)/\($0.model.id)" }
+            enabledModelIds = await configuredEnabledIds()
         }
 
         var currentEnabledIds = enabledModelIds
@@ -3428,15 +3464,20 @@ public final class InteractiveMode {
             }
         }
 
+        // Set once the user edits the scope, so the background refresh never overwrites their work.
+        var selectionChanged = false
+
         showSelector { done in
             let selector = ScopedModelsSelectorComponent(
                 config: ModelsConfig(
                     allModels: allModels,
                     enabledModelIds: currentEnabledIds,
-                    hasEnabledModelsFilter: hasFilter
+                    hasEnabledModelsFilter: hasFilter,
+                    refreshStatus: "Refreshing model catalogs…"
                 ),
                 callbacks: ModelsCallbacks(
                     onModelToggle: { modelId, enabled in
+                        selectionChanged = true
                         if enabled {
                             if !currentEnabledIds.contains(modelId) {
                                 currentEnabledIds.append(modelId)
@@ -3452,14 +3493,17 @@ public final class InteractiveMode {
                         self.showStatus("Model selection saved to settings")
                     },
                     onEnableAll: { allModelIds in
+                        selectionChanged = true
                         currentEnabledIds = allModelIds
                         Task { await updateSessionModels(currentEnabledIds) }
                     },
                     onClearAll: {
+                        selectionChanged = true
                         currentEnabledIds = []
                         Task { await updateSessionModels(currentEnabledIds) }
                     },
                     onToggleProvider: { _, modelIds, enabled in
+                        selectionChanged = true
                         for id in modelIds {
                             if enabled {
                                 if !currentEnabledIds.contains(id) {
@@ -3477,6 +3521,33 @@ public final class InteractiveMode {
                     }
                 )
             )
+
+            // Background refresh over the cached list. `showSelector` cancels `refreshSignal`
+            // through `closeSelector()` on every exit path, so closing stops the fetch (#7153).
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let outcome = await runBoundedCatalogRefresh(
+                    registry: session.modelRegistry,
+                    signal: selector.refreshSignal
+                )
+                guard !selector.isClosed else { return }
+
+                allModels = await session.modelRegistry.getAvailable()
+                if !selectionChanged && !hasSessionScope {
+                    currentEnabledIds = await configuredEnabledIds()
+                    selector.updateModels(allModels, enabledModelIds: hasFilter ? currentEnabledIds : nil)
+                } else {
+                    selector.updateModels(allModels)
+                }
+                if hasFilter {
+                    await updateSessionModels(currentEnabledIds)
+                }
+
+                let status = CatalogRefreshStatus.scopedModelsMessage(outcome)
+                selector.setRefreshStatus(status.text, isError: status.isError)
+                self.ui.requestRender()
+            }
+
             return (component: selector, focus: selector)
         }
     }
@@ -3795,10 +3866,18 @@ public final class InteractiveMode {
 
         do {
             try await authStorage.login(provider, callbacks: callbacks)
+            // Local credential consistency first — this must be synchronous so the session picks
+            // up the new credential immediately.
             _ = await session?.modelRegistry.refresh(ModelsRefreshOptions(allowNetwork: false))
             await session?.refreshActiveModel()
             restoreEditor()
             showStatus("Logged in to \(providerName). Credentials saved to \(getAuthPath())")
+            // Freshness is then chased in a bounded background refresh, so login can never hang
+            // behind a stalled catalog fetch (#7027, #7113, #7418).
+            refreshProviderCatalogInBackground(
+                providerId: provider.rawValue,
+                actionLabel: "Logged in to \(providerName)"
+            )
         } catch {
             restoreEditor()
             let message = error.localizedDescription
@@ -3812,9 +3891,37 @@ public final class InteractiveMode {
     private func handleOAuthLogout(_ provider: OAuthProvider, authStorage: AuthStorage) async {
         let providerName = getOAuthProviders().first { $0.id == provider }?.name ?? provider.rawValue
         authStorage.logout(provider)
+        // Local credential consistency first, then bounded background freshness (#7027, #7113, #7418).
         _ = await session?.modelRegistry.refresh(ModelsRefreshOptions(allowNetwork: false))
         await session?.refreshActiveModel()
         showStatus("Logged out of \(providerName)")
+        refreshProviderCatalogInBackground(
+            providerId: provider.rawValue,
+            actionLabel: "Logged out of \(providerName)"
+        )
+    }
+
+    /// Refreshes a single provider's catalog without blocking the caller. Each call gets its own
+    /// cancellation token, so a forced refresh never queues behind a stalled earlier one — the
+    /// coordinator's per-provider generation guard supersedes-and-cancels the previous run
+    /// (#7301, #7421).
+    @MainActor
+    private func refreshProviderCatalogInBackground(providerId: String, actionLabel: String) {
+        guard let session else { return }
+        Task { @MainActor [weak self] in
+            let outcome = await runBoundedCatalogRefresh(
+                registry: session.modelRegistry,
+                providers: [providerId],
+                signal: CancellationToken()
+            )
+            guard let self else { return }
+            if let warning = CatalogRefreshStatus.authMessage(outcome, actionLabel: actionLabel) {
+                self.showWarning(warning)
+            }
+            await session.refreshActiveModel()
+            self.footer?.invalidate()
+            self.ui.requestRender()
+        }
     }
 
     @MainActor

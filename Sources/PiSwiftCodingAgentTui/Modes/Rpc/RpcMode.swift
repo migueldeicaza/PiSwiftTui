@@ -277,6 +277,17 @@ private func makeErrorResponse(_ id: Any?, _ command: String, _ message: String)
 public func runRpcMode(_ session: AgentSession) async {
     let output = RpcOutput.takeOverStdout()
 
+    // Upstream refreshes the catalogs here in the background (interactive mode starts its own
+    // refresh after TUI initialization). RPC startup must not wait on the network.
+    let catalogRefresh = Task { @MainActor in
+        guard !isOfflineEnvironmentEnabled() else { return }
+        _ = await runBoundedCatalogRefresh(
+            registry: session.modelRegistry,
+            signal: CancellationToken()
+        )
+    }
+    defer { catalogRefresh.cancel() }
+
     let pendingHookRequests = PendingHookRequests()
     let uiContext = await MainActor.run {
         RpcHookUIContext(output: output, pending: pendingHookRequests)

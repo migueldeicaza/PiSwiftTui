@@ -64,11 +64,19 @@ public struct ModelsConfig: Sendable {
     public var allModels: [Model]
     public var enabledModelIds: [String]
     public var hasEnabledModelsFilter: Bool
+    /// Shown while the background catalog refresh is in flight.
+    public var refreshStatus: String?
 
-    public init(allModels: [Model], enabledModelIds: [String], hasEnabledModelsFilter: Bool) {
+    public init(
+        allModels: [Model],
+        enabledModelIds: [String],
+        hasEnabledModelsFilter: Bool,
+        refreshStatus: String? = nil
+    ) {
         self.allModels = allModels
         self.enabledModelIds = enabledModelIds
         self.hasEnabledModelsFilter = hasEnabledModelsFilter
+        self.refreshStatus = refreshStatus
     }
 }
 
@@ -98,7 +106,7 @@ public struct ModelsCallbacks {
 }
 
 @MainActor
-public final class ScopedModelsSelectorComponent: Container, SystemCursorAware {
+public final class ScopedModelsSelectorComponent: Container, SystemCursorAware, SelectorClosable {
     private var modelsById: [String: Model] = [:]
     private var allIds: [String] = []
     private var enabledIds: EnabledIds = nil
@@ -107,9 +115,13 @@ public final class ScopedModelsSelectorComponent: Container, SystemCursorAware {
     private let searchInput: Input
     private let listContainer: Container
     private let footerText: Text
+    private let statusText: Text
     private let callbacks: ModelsCallbacks
     private let maxVisible = 15
     private var isDirty = false
+    /// Cancels the background catalog refresh when the selector closes (#7153).
+    public let refreshSignal = CancellationToken()
+    private var closed = false
     public var usesSystemCursor: Bool {
         get { searchInput.usesSystemCursor }
         set { searchInput.usesSystemCursor = newValue }
@@ -130,6 +142,7 @@ public final class ScopedModelsSelectorComponent: Container, SystemCursorAware {
         searchInput = Input()
         listContainer = Container()
         footerText = Text("", paddingX: 0, paddingY: 0)
+        statusText = Text(config.refreshStatus.map { theme.fg(.muted, $0) } ?? "", paddingX: 0, paddingY: 0)
 
         super.init()
 
@@ -142,11 +155,48 @@ public final class ScopedModelsSelectorComponent: Container, SystemCursorAware {
         addChild(Spacer(1))
         addChild(listContainer)
         addChild(Spacer(1))
+        addChild(statusText)
         addChild(footerText)
         addChild(DynamicBorder())
 
         refresh()
     }
+
+    /// Replaces the model set after a background catalog refresh. `enabledModelIds` is supplied
+    /// only when the caller recomputed the enabled scope; otherwise the current scope is kept.
+    public func updateModels(_ models: [Model], enabledModelIds: [String]? = nil) {
+        modelsById = [:]
+        allIds = []
+        for model in models {
+            let fullId = "\(model.provider)/\(model.id)"
+            modelsById[fullId] = model
+            allIds.append(fullId)
+        }
+        if let enabledModelIds {
+            enabledIds = enabledModelIds
+        } else if let current = enabledIds {
+            // Drop ids the refreshed catalogs no longer contain.
+            enabledIds = current.filter { modelsById[$0] != nil }
+        }
+        refresh()
+    }
+
+    public func setRefreshStatus(_ message: String, isError: Bool) {
+        statusText.setText(theme.fg(isError ? .warning : .success, message))
+    }
+
+    public func clearRefreshStatus() {
+        statusText.setText("")
+    }
+
+    /// Cancels the in-flight catalog refresh when the selector leaves the screen (#7153).
+    public func closeSelector() {
+        guard !closed else { return }
+        closed = true
+        refreshSignal.cancel()
+    }
+
+    public var isClosed: Bool { closed }
 
     private func buildItems() -> [ModelItem] {
         getSortedIds(enabledIds, allIds).compactMap { id in

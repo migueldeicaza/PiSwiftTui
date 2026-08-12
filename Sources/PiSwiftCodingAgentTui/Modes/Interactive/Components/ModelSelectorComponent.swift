@@ -15,7 +15,7 @@ private struct ScopedModelItem {
 }
 
 @MainActor
-public final class ModelSelectorComponent: Container, SystemCursorAware {
+public final class ModelSelectorComponent: Container, SystemCursorAware, SelectorClosable {
     private let searchInput: Input
     private let listContainer: Container
     private var allModels: [ModelItem] = []
@@ -27,6 +27,11 @@ public final class ModelSelectorComponent: Container, SystemCursorAware {
     private let onSelectCallback: (Model) -> Void
     private let onCancelCallback: () -> Void
     private var errorMessage: String?
+    /// Success/progress line for the background catalog refresh; never an error.
+    private var refreshStatusMessage: String?
+    /// Cancels the background refresh when the selector closes (#7153).
+    private let refreshSignal = CancellationToken()
+    private var closed = false
     private let tui: TUI
     private let scopedModels: [ScopedModelItem]
     private let initialSearchInput: String?
@@ -87,47 +92,80 @@ public final class ModelSelectorComponent: Container, SystemCursorAware {
         loadModels()
     }
 
+    /// Renders whatever is already cached, then — for the unscoped picker — refreshes the
+    /// catalogs in the background (#7443, #7153). Opening the picker never blocks on the network.
     private func loadModels() {
         Task { @MainActor in
-            var items: [ModelItem] = []
-
-            if !scopedModels.isEmpty {
-                items = scopedModels.map { scoped in
-                    ModelItem(provider: scoped.model.provider, id: scoped.model.id, model: scoped.model)
-                }
-            } else {
-                // Local-only refresh: the previous synchronous `refresh()` just re-read
-                // models.json, so this preserves today's behavior exactly. Opening the picker must
-                // not block on a network catalog fetch — upstream (#7443, #7153) renders cached
-                // models immediately and refreshes in the background with a cancellable signal.
-                // That interactive behavior lands in the follow-up call-site work order.
-                _ = await modelRegistry.refresh(ModelsRefreshOptions(allowNetwork: false))
-                errorMessage = modelRegistry.getError()
-                let available = await modelRegistry.getAvailable()
-                items = available.map { model in
-                    ModelItem(provider: model.provider, id: model.id, model: model)
-                }
-            }
-
-            items.sort { lhs, rhs in
-                let lhsCurrent = modelsAreEqual(currentModel, lhs.model)
-                let rhsCurrent = modelsAreEqual(currentModel, rhs.model)
-                if lhsCurrent != rhsCurrent {
-                    return lhsCurrent
-                }
-                return lhs.provider.localizedCaseInsensitiveCompare(rhs.provider) == .orderedAscending
-            }
-
-            allModels = items
-            filteredModels = items
-            selectedIndex = min(selectedIndex, max(0, items.count - 1))
-            if let initialSearchInput, !initialSearchInput.isEmpty {
-                filterModels(initialSearchInput)
-            } else {
-                updateList()
-            }
-            tui.requestRender()
+            await loadModelsFromSnapshot()
+            guard scopedModels.isEmpty else { return }
+            await refreshModels()
         }
+    }
+
+    /// Reads the current (cached) model snapshot into the list without touching the network.
+    /// `adoptRegistryError` is false once a refresh has produced its own status message.
+    private func loadModelsFromSnapshot(adoptRegistryError: Bool = true) async {
+        var items: [ModelItem] = []
+
+        if !scopedModels.isEmpty {
+            items = scopedModels.map { scoped in
+                ModelItem(provider: scoped.model.provider, id: scoped.model.id, model: scoped.model)
+            }
+        } else {
+            if adoptRegistryError {
+                errorMessage = modelRegistry.getError()
+            }
+            let available = await modelRegistry.getAvailable()
+            items = available.map { model in
+                ModelItem(provider: model.provider, id: model.id, model: model)
+            }
+        }
+
+        items.sort { lhs, rhs in
+            let lhsCurrent = modelsAreEqual(currentModel, lhs.model)
+            let rhsCurrent = modelsAreEqual(currentModel, rhs.model)
+            if lhsCurrent != rhsCurrent {
+                return lhsCurrent
+            }
+            return lhs.provider.localizedCaseInsensitiveCompare(rhs.provider) == .orderedAscending
+        }
+
+        allModels = items
+        selectedIndex = min(selectedIndex, max(0, items.count - 1))
+        let query = searchInput.getValue()
+        if query.isEmpty {
+            filteredModels = items
+            updateList()
+        } else {
+            filterModels(query)
+        }
+        tui.requestRender()
+    }
+
+    /// Background catalog refresh with its own cancellation token, bounded by the shared timeout.
+    /// The cached list stays on screen throughout; only the status line changes.
+    private func refreshModels() async {
+        let outcome = await runBoundedCatalogRefresh(registry: modelRegistry, signal: refreshSignal)
+        guard !closed else { return }
+
+        refreshStatusMessage = nil
+        if let message = CatalogRefreshStatus.selectorMessage(outcome) {
+            errorMessage = message
+        } else {
+            errorMessage = modelRegistry.getError()
+            if errorMessage == nil {
+                refreshStatusMessage = "Model catalogs refreshed."
+            }
+        }
+
+        await loadModelsFromSnapshot(adoptRegistryError: false)
+    }
+
+    /// Cancels the in-flight refresh. Called when the selector closes (#7153).
+    public func closeSelector() {
+        guard !closed else { return }
+        closed = true
+        refreshSignal.cancel()
     }
 
     private func filterModels(_ query: String) {
@@ -172,6 +210,8 @@ public final class ModelSelectorComponent: Container, SystemCursorAware {
             for line in errorMessage.split(separator: "\n", omittingEmptySubsequences: false) {
                 listContainer.addChild(Text(theme.fg(.error, String(line)), paddingX: 0, paddingY: 0))
             }
+        } else if let refreshStatusMessage {
+            listContainer.addChild(Text(theme.fg(.success, refreshStatusMessage), paddingX: 0, paddingY: 0))
         } else if filteredModels.isEmpty {
             listContainer.addChild(Text(theme.fg(.muted, "  No matching models"), paddingX: 0, paddingY: 0))
         }
